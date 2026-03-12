@@ -1,6 +1,6 @@
 package store
 
-import "github.com/A-pen-app/ai-agent-backend/models"
+import "github.com/A-pen-app/ai-agent-sdk/models"
 
 type Agent interface {
 	ListThreads(userID, cursor string, count int) ([]models.ThreadWithPin, error)

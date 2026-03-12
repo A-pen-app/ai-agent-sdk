@@ -1,4 +1,4 @@
-module github.com/A-pen-app/ai-agent-backend
+module github.com/A-pen-app/ai-agent-sdk
 
 go 1.24.0
 

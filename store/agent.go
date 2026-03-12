@@ -3,7 +3,7 @@ package store
 import (
 	"fmt"
 
-	"github.com/A-pen-app/ai-agent-backend/models"
+	"github.com/A-pen-app/ai-agent-sdk/models"
 	"github.com/jmoiron/sqlx"
 )
 

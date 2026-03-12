@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/A-pen-app/ai-agent-backend/models"
-	"github.com/A-pen-app/ai-agent-backend/store"
+	"github.com/A-pen-app/ai-agent-sdk/models"
+	"github.com/A-pen-app/ai-agent-sdk/store"
 	"github.com/google/uuid"
 )
 

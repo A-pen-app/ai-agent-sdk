@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/A-pen-app/logging"
-	"github.com/A-pen-app/ai-agent-backend/models"
+	"github.com/A-pen-app/ai-agent-sdk/models"
 )
 
 // mastraChunk represents a single SSE JSON chunk from Mastra's /stream endpoint.

@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 
-	"github.com/A-pen-app/ai-agent-backend/models"
+	"github.com/A-pen-app/ai-agent-sdk/models"
 )
 
 // StreamWriter is a callback that sends an SSE envelope to the client.
