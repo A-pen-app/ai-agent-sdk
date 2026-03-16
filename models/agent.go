@@ -130,7 +130,7 @@ type UpdateThreadRequest struct {
 
 // StreamRequest is the request body for the stream endpoint.
 type StreamRequest struct {
-	ThreadID string `json:"thread_id" binding:"required"`
+	ThreadID string `json:"thread_id"` // ThreadID now comes from URL path parameter, not required in JSON
 	Query    string `json:"query" binding:"required"`
 }
 
