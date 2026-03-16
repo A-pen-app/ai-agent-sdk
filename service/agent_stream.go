@@ -75,7 +75,7 @@ func (svc *agentService) StreamChat(ctx context.Context, userID string, req *mod
 	}
 
 	// Send finish with the full message list from DB.
-	messages, err := svc.ListMessages(req.ThreadID, userID, "", 100)
+	messages, err := svc.ListMessages(streamCtx, req.ThreadID, userID, "", 100)
 	if err != nil {
 		logging.Error(streamCtx, "failed to list messages for finish event: %v", err)
 		_ = writer(&models.StreamEnvelope{Event: models.StreamEventFinish, Data: []models.MessageResponse{}})

@@ -1,15 +1,18 @@
 package store
 
-import "github.com/A-pen-app/ai-agent-sdk/models"
+import (
+	"context"
+	"github.com/A-pen-app/ai-agent-sdk/models"
+)
 
 type Agent interface {
-	ListThreads(userID, cursor string, count int) ([]models.ThreadWithPin, error)
-	SearchThreads(userID, keyword, cursor string, count int) ([]models.ThreadWithPin, error)
-	CreateThread(thread *models.MastraThread) error
-	GetThread(threadID, userID string) (*models.ThreadWithPin, error)
-	DeleteThread(threadID, userID string) error
-	UpdateThread(threadID, userID, title string) error
-	UpdateThreadPin(userID, threadID string, isPinned bool) error
-	ListMessages(threadID, userID, cursor string, count int) ([]models.MessageWithFeedback, error)
-	UpsertFeedback(userID, messageID, feedback string) error
+	ListThreads(ctx context.Context, userID, cursor string, count int) ([]models.ThreadWithPin, error)
+	SearchThreads(ctx context.Context, userID, keyword, cursor string, count int) ([]models.ThreadWithPin, error)
+	CreateThread(ctx context.Context, thread *models.MastraThread) error
+	GetThread(ctx context.Context, threadID, userID string) (*models.ThreadWithPin, error)
+	DeleteThread(ctx context.Context, threadID, userID string) error
+	UpdateThread(ctx context.Context, threadID, userID, title string) error
+	UpdateThreadPin(ctx context.Context, userID, threadID string, isPinned bool) error
+	ListMessages(ctx context.Context, threadID, userID, cursor string, count int) ([]models.MessageWithFeedback, error)
+	UpsertFeedback(ctx context.Context, userID, messageID, feedback string) error
 }

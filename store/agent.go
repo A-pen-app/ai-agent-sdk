@@ -1,9 +1,12 @@
 package store
 
 import (
+	"context"
 	"fmt"
 
+	e "github.com/A-pen-app/errors"
 	"github.com/A-pen-app/ai-agent-sdk/models"
+	"github.com/A-pen-app/logging"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -16,7 +19,7 @@ func NewAgent(db *sqlx.DB) Agent {
 	return &agentStore{db: db}
 }
 
-func (s *agentStore) ListThreads(userID, cursor string, count int) ([]models.ThreadWithPin, error) {
+func (s *agentStore) ListThreads(ctx context.Context, userID, cursor string, count int) ([]models.ThreadWithPin, error) {
 	query := `
 		WITH threads AS (
 			SELECT
@@ -52,12 +55,15 @@ func (s *agentStore) ListThreads(userID, cursor string, count int) ([]models.Thr
 
 	var rows []models.ThreadWithPin
 	if err := s.db.Select(&rows, query, args...); err != nil {
+		logging.Errorw(ctx, "Failed to list threads",
+			"user_id", userID,
+			"error", err.Error())
 		return nil, err
 	}
 	return rows, nil
 }
 
-func (s *agentStore) SearchThreads(userID, keyword, cursor string, count int) ([]models.ThreadWithPin, error) {
+func (s *agentStore) SearchThreads(ctx context.Context, userID, keyword, cursor string, count int) ([]models.ThreadWithPin, error) {
 	query := `
 		WITH threads AS (
 			SELECT
@@ -94,12 +100,17 @@ func (s *agentStore) SearchThreads(userID, keyword, cursor string, count int) ([
 
 	var rows []models.ThreadWithPin
 	if err := s.db.Select(&rows, query, args...); err != nil {
+		logging.Errorw(ctx, "Failed to search threads",
+			"user_id", userID,
+			"keyword", keyword,
+			"error", err.Error())
 		return nil, err
 	}
+	
 	return rows, nil
 }
 
-func (s *agentStore) CreateThread(thread *models.MastraThread) error {
+func (s *agentStore) CreateThread(ctx context.Context, thread *models.MastraThread) error {
 	query := `
 		INSERT INTO mastra_threads (id, "resourceId", title, metadata, "createdAt", "updatedAt")
 		VALUES (:id, :resourceId, :title, :metadata, :createdAt, :updatedAt)
@@ -108,10 +119,19 @@ func (s *agentStore) CreateThread(thread *models.MastraThread) error {
 			"updatedAt" = EXCLUDED."updatedAt"
 	`
 	_, err := s.db.NamedExec(query, thread)
-	return err
+	if err != nil {
+		logging.Errorw(ctx, "Failed to create thread",
+			"thread_id", thread.ID,
+			"user_id", thread.ResourceID,
+			"title", thread.Title,
+			"error", err.Error())
+		return err
+	}
+	
+	return nil
 }
 
-func (s *agentStore) GetThread(threadID, userID string) (*models.ThreadWithPin, error) {
+func (s *agentStore) GetThread(ctx context.Context, threadID, userID string) (*models.ThreadWithPin, error) {
 	query := `
 		SELECT
 			t.id,
@@ -124,24 +144,47 @@ func (s *agentStore) GetThread(threadID, userID string) (*models.ThreadWithPin, 
 	var thread models.ThreadWithPin
 	err := s.db.Get(&thread, query, userID, threadID)
 	if err != nil {
-		return nil, fmt.Errorf("thread not found or not owned by user")
+		logging.Errorw(ctx, "Thread not found or access denied",
+			"thread_id", threadID,
+			"user_id", userID,
+			"error", err.Error(),
+			"db_error", err)
+		
+		return nil, e.Wrap(e.ErrorNotFound, "thread not found or not owned by user")
 	}
+	
 	return &thread, nil
 }
 
-func (s *agentStore) DeleteThread(threadID, userID string) error {
+func (s *agentStore) DeleteThread(ctx context.Context, threadID, userID string) error {
 	// Delete the thread (only if owned by user).
 	result, err := s.db.Exec(`DELETE FROM mastra_threads WHERE id = $1 AND "resourceId" = $2`, threadID, userID)
 	if err != nil {
+		logging.Errorw(ctx, "Failed to delete thread - database error",
+			"thread_id", threadID,
+			"user_id", userID,
+			"error", err.Error())
 		return err
 	}
+	
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
+		logging.Errorw(ctx, "Failed to get affected rows after delete",
+			"thread_id", threadID,
+			"user_id", userID,
+			"error", err.Error())
 		return err
 	}
+	
 	if rowsAffected == 0 {
-		return fmt.Errorf("thread not found or not owned by user")
+		logging.Errorw(ctx, "Thread not found for deletion or access denied",
+			"thread_id", threadID,
+			"user_id", userID,
+			"rows_affected", rowsAffected)
+		
+		return e.Wrap(e.ErrorNotFound, "thread not found or not owned by user")
 	}
+	
 	// Delete related records.
 	_, _ = s.db.Exec(`DELETE FROM mastra_messages WHERE thread_id = $1`, threadID)
 	_, _ = s.db.Exec(`DELETE FROM thread_pin WHERE thread_id = $1 AND user_id = $2`, threadID, userID)
@@ -149,23 +192,41 @@ func (s *agentStore) DeleteThread(threadID, userID string) error {
 	return nil
 }
 
-func (s *agentStore) UpdateThread(threadID, userID, title string) error {
+func (s *agentStore) UpdateThread(ctx context.Context, threadID, userID, title string) error {
 	query := `UPDATE mastra_threads SET title = $1, "updatedAt" = NOW() WHERE id = $2 AND "resourceId" = $3`
 	result, err := s.db.Exec(query, title, threadID, userID)
 	if err != nil {
+		logging.Errorw(ctx, "Failed to update thread - database error",
+			"thread_id", threadID,
+			"user_id", userID,
+			"title", title,
+			"error", err.Error())
 		return err
 	}
+	
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
+		logging.Errorw(ctx, "Failed to get affected rows after update",
+			"thread_id", threadID,
+			"user_id", userID,
+			"error", err.Error())
 		return err
 	}
+	
 	if rowsAffected == 0 {
-		return fmt.Errorf("thread not found or not owned by user")
+		logging.Errorw(ctx, "Thread not found for update or access denied",
+			"thread_id", threadID,
+			"user_id", userID,
+			"title", title,
+			"rows_affected", rowsAffected)
+		
+		return e.Wrap(e.ErrorNotFound, "thread not found or not owned by user")
 	}
+	
 	return nil
 }
 
-func (s *agentStore) UpdateThreadPin(userID, threadID string, isPinned bool) error {
+func (s *agentStore) UpdateThreadPin(ctx context.Context, userID, threadID string, isPinned bool) error {
 	if isPinned {
 		query := `
 			INSERT INTO thread_pin (user_id, thread_id, is_deleted, pinned_at)
@@ -174,17 +235,31 @@ func (s *agentStore) UpdateThreadPin(userID, threadID string, isPinned bool) err
 			DO UPDATE SET is_deleted = false, pinned_at = NOW()
 		`
 		_, err := s.db.Exec(query, userID, threadID)
-		return err
+		if err != nil {
+			logging.Errorw(ctx, "Failed to pin thread",
+				"user_id", userID,
+				"thread_id", threadID,
+				"error", err.Error())
+			return err
+		}
+		return nil
 	}
 	query := `
 		UPDATE thread_pin SET is_deleted = true
 		WHERE user_id = $1 AND thread_id = $2
 	`
 	_, err := s.db.Exec(query, userID, threadID)
-	return err
+	if err != nil {
+		logging.Errorw(ctx, "Failed to unpin thread",
+			"user_id", userID,
+			"thread_id", threadID,
+			"error", err.Error())
+		return err
+	}
+	return nil
 }
 
-func (s *agentStore) ListMessages(threadID, userID, cursor string, count int) ([]models.MessageWithFeedback, error) {
+func (s *agentStore) ListMessages(ctx context.Context, threadID, userID, cursor string, count int) ([]models.MessageWithFeedback, error) {
 	query := `
 		SELECT
 			m.id,
@@ -217,12 +292,17 @@ func (s *agentStore) ListMessages(threadID, userID, cursor string, count int) ([
 
 	var rows []models.MessageWithFeedback
 	if err := s.db.Select(&rows, query, args...); err != nil {
+		logging.Errorw(ctx, "Failed to list messages",
+			"thread_id", threadID,
+			"user_id", userID,
+			"error", err.Error())
 		return nil, err
 	}
+	
 	return rows, nil
 }
 
-func (s *agentStore) UpsertFeedback(userID, messageID, feedback string) error {
+func (s *agentStore) UpsertFeedback(ctx context.Context, userID, messageID, feedback string) error {
 	query := `
 		INSERT INTO response_feedback (user_id, thread_id, message_id, feedback_type, created_at, updated_at)
 		SELECT $1, m.thread_id, $2, $3, NOW(), NOW()
@@ -233,16 +313,31 @@ func (s *agentStore) UpsertFeedback(userID, messageID, feedback string) error {
 	`
 	result, err := s.db.Exec(query, userID, messageID, feedback)
 	if err != nil {
+		logging.Errorw(ctx, "Failed to upsert feedback - database error",
+			"user_id", userID,
+			"message_id", messageID,
+			"feedback", feedback,
+			"error", err.Error())
 		return err
 	}
 
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
+		logging.Errorw(ctx, "Failed to get affected rows after feedback upsert",
+			"user_id", userID,
+			"message_id", messageID,
+			"error", err.Error())
 		return err
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("message not found")
+		logging.Errorw(ctx, "Message not found for feedback upsert",
+			"user_id", userID,
+			"message_id", messageID,
+			"feedback", feedback,
+			"rows_affected", rowsAffected)
+		
+		return e.Wrap(e.ErrorNotFound, "message not found")
 	}
 
 	return nil

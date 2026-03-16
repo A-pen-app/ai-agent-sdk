@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	e "github.com/A-pen-app/errors"
+	"github.com/A-pen-app/logging"
 	"github.com/A-pen-app/ai-agent-sdk/models"
 	"github.com/A-pen-app/ai-agent-sdk/store"
 	"github.com/google/uuid"
@@ -35,23 +37,23 @@ func NewAgent(s store.Agent, agentStreamURL string) Agent {
 	}
 }
 
-func (svc *agentService) ListThreads(userID, cursor string, count int) (*models.ThreadListResponse, error) {
-	rows, err := svc.s.ListThreads(userID, cursor, count)
+func (svc *agentService) ListThreads(ctx context.Context, userID, cursor string, count int) (*models.ThreadListResponse, error) {
+	rows, err := svc.s.ListThreads(ctx, userID, cursor, count)
 	if err != nil {
 		return nil, err
 	}
 	return buildThreadListResponse(rows, count), nil
 }
 
-func (svc *agentService) SearchThreads(userID, keyword, cursor string, count int) (*models.ThreadListResponse, error) {
-	rows, err := svc.s.SearchThreads(userID, keyword, cursor, count)
+func (svc *agentService) SearchThreads(ctx context.Context, userID, keyword, cursor string, count int) (*models.ThreadListResponse, error) {
+	rows, err := svc.s.SearchThreads(ctx, userID, keyword, cursor, count)
 	if err != nil {
 		return nil, err
 	}
 	return buildThreadListResponse(rows, count), nil
 }
 
-func (svc *agentService) CreateThread(userID, query string) (*models.ThreadResponse, error) {
+func (svc *agentService) CreateThread(ctx context.Context, userID, query string) (*models.ThreadResponse, error) {
 	now := time.Now().UTC()
 	thread := &models.MastraThread{
 		ID:         uuid.New().String(),
@@ -60,7 +62,7 @@ func (svc *agentService) CreateThread(userID, query string) (*models.ThreadRespo
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
-	if err := svc.s.CreateThread(thread); err != nil {
+	if err := svc.s.CreateThread(ctx, thread); err != nil {
 		return nil, err
 	}
 	return &models.ThreadResponse{
@@ -70,8 +72,8 @@ func (svc *agentService) CreateThread(userID, query string) (*models.ThreadRespo
 	}, nil
 }
 
-func (svc *agentService) GetThread(threadID, userID string) (*models.ThreadResponse, error) {
-	threadWithPin, err := svc.s.GetThread(threadID, userID)
+func (svc *agentService) GetThread(ctx context.Context, threadID, userID string) (*models.ThreadResponse, error) {
+	threadWithPin, err := svc.s.GetThread(ctx, threadID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -82,12 +84,12 @@ func (svc *agentService) GetThread(threadID, userID string) (*models.ThreadRespo
 	}, nil
 }
 
-func (svc *agentService) DeleteThread(threadID, userID string) error {
-	return svc.s.DeleteThread(threadID, userID)
+func (svc *agentService) DeleteThread(ctx context.Context, threadID, userID string) error {
+	return svc.s.DeleteThread(ctx, threadID, userID)
 }
 
-func (svc *agentService) UpdateThread(threadID, userID, title string) (*models.ThreadResponse, error) {
-	if err := svc.s.UpdateThread(threadID, userID, title); err != nil {
+func (svc *agentService) UpdateThread(ctx context.Context, threadID, userID, title string) (*models.ThreadResponse, error) {
+	if err := svc.s.UpdateThread(ctx, threadID, userID, title); err != nil {
 		return nil, err
 	}
 	return &models.ThreadResponse{
@@ -96,12 +98,12 @@ func (svc *agentService) UpdateThread(threadID, userID, title string) (*models.T
 	}, nil
 }
 
-func (svc *agentService) UpdateThreadPin(userID, threadID string, isPinned bool) error {
-	return svc.s.UpdateThreadPin(userID, threadID, isPinned)
+func (svc *agentService) UpdateThreadPin(ctx context.Context, userID, threadID string, isPinned bool) error {
+	return svc.s.UpdateThreadPin(ctx, userID, threadID, isPinned)
 }
 
-func (svc *agentService) ListMessages(threadID, userID, cursor string, count int) (*models.MessageListResponse, error) {
-	rows, err := svc.s.ListMessages(threadID, userID, cursor, count)
+func (svc *agentService) ListMessages(ctx context.Context, threadID, userID, cursor string, count int) (*models.MessageListResponse, error) {
+	rows, err := svc.s.ListMessages(ctx, threadID, userID, cursor, count)
 	if err != nil {
 		return nil, err
 	}
@@ -125,8 +127,8 @@ func (svc *agentService) ListMessages(threadID, userID, cursor string, count int
 	return resp, nil
 }
 
-func (svc *agentService) UpsertFeedback(userID, messageID, feedback string) error {
-	return svc.s.UpsertFeedback(userID, messageID, feedback)
+func (svc *agentService) UpsertFeedback(ctx context.Context, userID, messageID, feedback string) error {
+	return svc.s.UpsertFeedback(ctx, userID, messageID, feedback)
 }
 
 // buildThreadListResponse trims the fetch-N+1 result and sets the next cursor.
@@ -435,13 +437,18 @@ func deduplicateRefs(raw []refJSON) []models.Reference {
 }
 
 // PauseStream cancels the active stream for the given thread.
-func (svc *agentService) PauseStream(threadID, userID string) error {
+func (svc *agentService) PauseStream(ctx context.Context, threadID, userID string) error {
 	svc.streamMutex.Lock()
 	defer svc.streamMutex.Unlock()
 
 	cancel, exists := svc.activeStreams[threadID]
 	if !exists {
-		return fmt.Errorf("no active stream found for thread %s", threadID)
+		logging.Errorw(ctx, "No active stream found for thread",
+			"thread_id", threadID,
+			"user_id", userID,
+			"active_streams_count", len(svc.activeStreams))
+		
+		return e.Wrap(e.ErrorNotFound, "no active stream found for thread")
 	}
 
 	// Cancel the context to stop the stream
