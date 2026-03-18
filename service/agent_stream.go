@@ -183,15 +183,9 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 			}
 
 		case "tool-call":
-			// For workflow tools, expand into inner steps using args.
-			if strings.HasPrefix(chunk.Payload.ToolName, "workflow-") {
-				for _, step := range extractWorkflowSteps(chunk.Payload.Args, nil) {
-					_ = writer(&models.StreamEnvelope{
-						Event: models.StreamEventWorkflowStep,
-						Data:  step,
-					})
-				}
-			} else if chunk.Payload.ToolName != "" {
+			// Only emit workflow steps for non-workflow tools to avoid duplicates.
+			// Workflow steps will be emitted when actually executed via tool-output events.
+			if !strings.HasPrefix(chunk.Payload.ToolName, "workflow-") && chunk.Payload.ToolName != "" {
 				_ = writer(&models.StreamEnvelope{
 					Event: models.StreamEventWorkflowStep,
 					Data:  models.WorkflowStep{ID: chunk.Payload.ToolCallID, DisplayName: chunk.Payload.ToolName},

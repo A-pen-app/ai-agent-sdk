@@ -94,6 +94,20 @@ type Reference struct {
 	Post          interface{} `json:"post,omitempty" swaggertype:"object"`  // Complete post data when reference type is "post"
 }
 
+// ToolResult represents the result structure in new format tool invocations
+type ToolResult struct {
+	Result *WorkflowResult `json:"result,omitempty"`
+	RunID  string          `json:"runId,omitempty"`
+}
+
+// WorkflowResult represents the workflow execution result in new format
+type WorkflowResult struct {
+	Summary         string      `json:"summary,omitempty"`
+	FinalReferences []Reference `json:"final_references,omitempty"`
+	HasResults      bool        `json:"hasResults,omitempty"`
+}
+
+
 // MessageResponse is a single message in the API response.
 type MessageResponse struct {
 	ID            string         `json:"id"`
@@ -102,6 +116,7 @@ type MessageResponse struct {
 	Feedback      *string        `json:"feedback,omitempty"`
 	WorkflowSteps []WorkflowStep `json:"workflow_steps,omitempty"`
 	References    []Reference    `json:"references,omitempty"`
+	HasResults    *bool          `json:"has_results,omitempty"`
 }
 
 // MessageListResponse is the paginated message list response.

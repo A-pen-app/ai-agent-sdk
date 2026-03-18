@@ -183,6 +183,7 @@ func parseMessage(row models.MessageWithFeedback) models.MessageResponse {
 	var textParts []string
 	var steps []models.WorkflowStep
 	var refs []models.Reference
+	var hasResults *bool
 
 	for _, part := range v2.Parts {
 		switch part.Type {
@@ -197,11 +198,24 @@ func parseMessage(row models.MessageWithFeedback) models.MessageResponse {
 			ti := part.ToolInvocation
 			// Extract inner workflow steps from result if available.
 			if ti.State == "result" && ti.Result != nil {
-				innerSteps := extractWorkflowSteps(ti.Args, ti.Result)
-				if len(innerSteps) > 0 {
-					steps = append(steps, innerSteps...)
+				if strings.HasPrefix(ti.ToolName, "workflow-") {
+					// Workflow tool - extract inner steps
+					innerSteps := extractWorkflowSteps(ti.Args, ti.Result)
+					if len(innerSteps) > 0 {
+						steps = append(steps, innerSteps...)
+					}
+				} else if ti.ToolName != "" {
+					// Non-workflow tool - add as single step with translated name
+					displayName := translateToolName(ti.ToolName, ti.Args)
+					steps = append(steps, models.WorkflowStep{
+						ID:          ti.ToolCallID,
+						DisplayName: displayName,
+					})
 				}
 				refs = append(refs, extractReferences(ti.Result)...)
+				if hasResults == nil {
+					hasResults = extractHasResults(ti.Result)
+				}
 			}
 		}
 	}
@@ -212,6 +226,9 @@ func parseMessage(row models.MessageWithFeedback) models.MessageResponse {
 	}
 	if len(refs) > 0 {
 		msg.References = refs
+	}
+	if hasResults != nil {
+		msg.HasResults = hasResults
 	}
 	return msg
 }
@@ -250,6 +267,40 @@ func translateStepName(stepName, query string) string {
 	return ""
 }
 
+// translateToolName returns the Chinese display name for a known tool.
+func translateToolName(toolName string, args interface{}) string {
+	// Extract query from args if available
+	var query string
+	if args != nil {
+		if argsData, err := json.Marshal(args); err == nil {
+			var argsMap map[string]interface{}
+			if json.Unmarshal(argsData, &argsMap) == nil {
+				if q, ok := argsMap["query"].(string); ok {
+					query = q
+				} else if q, ok := argsMap["prompt"].(string); ok {
+					query = q
+				}
+			}
+		}
+	}
+	
+	switch toolName {
+	case "agent-financeSubAgent":
+		if query != "" {
+			return fmt.Sprintf("查詢關於%s的理財市場趨勢與資產配置相關資訊", query)
+		}
+		return "查詢理財市場趨勢與資產配置相關資訊"
+	case "agent-consultationProcessAgent":
+		if query != "" {
+			return fmt.Sprintf("查詢關於%s的專業醫療資訊", query)
+		}
+		return "查詢專業醫療資訊"
+	default:
+		// Return the original tool name if no translation is available
+		return toolName
+	}
+}
+
 // extractWorkflowSteps extracts the inner steps from a workflow tool invocation,
 // returning human-readable Chinese display names with the query inserted.
 //
@@ -271,51 +322,104 @@ func extractWorkflowSteps(args, result interface{}) []models.WorkflowStep {
 		ExecuteLecture       bool   `json:"executeLecture"`
 		ExecuteNhiRegulation bool   `json:"executeNhiRegulation"`
 		ExecuteFinance       bool   `json:"executeFinance"`
+		// New format with nested inputData
+		InputData struct {
+			Query                string `json:"query"`
+			ExecuteMedical       bool   `json:"executeMedical"`
+			ExecuteDrug          bool   `json:"executeDrug"`
+			ExecuteInsite        bool   `json:"executeInsite"`
+			ExecuteLaw           bool   `json:"executeLaw"`
+			ExecuteLecture       bool   `json:"executeLecture"`
+			ExecuteNhiRegulation bool   `json:"executeNhiRegulation"`
+			ExecuteFinance       bool   `json:"executeFinance"`
+		} `json:"inputData"`
 	}
 	if err := json.Unmarshal(argsData, &wfArgs); err != nil {
 		return nil
 	}
 
-	// Build a lookup for execute flags.
-	execFlags := map[string]bool{
-		"executeMedical":       wfArgs.ExecuteMedical,
-		"executeDrug":          wfArgs.ExecuteDrug,
-		"executeInsite":        wfArgs.ExecuteInsite,
-		"executeLaw":           wfArgs.ExecuteLaw,
-		"executeLecture":       wfArgs.ExecuteLecture,
-		"executeNhiRegulation": wfArgs.ExecuteNhiRegulation,
-		"executeFinance":       wfArgs.ExecuteFinance,
+	// Determine which format to use (new format has nested inputData)
+	var query string
+	var execFlags map[string]bool
+	
+	if wfArgs.InputData.Query != "" {
+		// New format with inputData
+		query = wfArgs.InputData.Query
+		execFlags = map[string]bool{
+			"executeMedical":       wfArgs.InputData.ExecuteMedical,
+			"executeDrug":          wfArgs.InputData.ExecuteDrug,
+			"executeInsite":        wfArgs.InputData.ExecuteInsite,
+			"executeLaw":           wfArgs.InputData.ExecuteLaw,
+			"executeLecture":       wfArgs.InputData.ExecuteLecture,
+			"executeNhiRegulation": wfArgs.InputData.ExecuteNhiRegulation,
+			"executeFinance":       wfArgs.InputData.ExecuteFinance,
+		}
+	} else {
+		// Old format with direct fields
+		query = wfArgs.Query
+		execFlags = map[string]bool{
+			"executeMedical":       wfArgs.ExecuteMedical,
+			"executeDrug":          wfArgs.ExecuteDrug,
+			"executeInsite":        wfArgs.ExecuteInsite,
+			"executeLaw":           wfArgs.ExecuteLaw,
+			"executeLecture":       wfArgs.ExecuteLecture,
+			"executeNhiRegulation": wfArgs.ExecuteNhiRegulation,
+			"executeFinance":       wfArgs.ExecuteFinance,
+		}
 	}
 
-	// If result is provided, parse it to verify which steps exist.
+	// Try to get steps from new format first
 	var resultSteps map[string]json.RawMessage
+	var hasNewFormat bool
+	
 	if result != nil {
 		resultData, err := json.Marshal(result)
 		if err == nil {
-			var outer struct {
+			// Try new format - direct result.result structure
+			var newFormat struct {
 				Result struct {
-					Steps map[string]json.RawMessage `json:"steps"`
+					Summary         string `json:"summary"`
+					FinalReferences []json.RawMessage `json:"final_references"`
+					HasResults      bool `json:"hasResults"`
 				} `json:"result"`
 			}
-			if json.Unmarshal(resultData, &outer) == nil {
-				resultSteps = outer.Result.Steps
+			if json.Unmarshal(resultData, &newFormat) == nil && newFormat.Result.HasResults {
+				hasNewFormat = true
+			} else {
+				// Fallback to old format
+				var outer struct {
+					Result struct {
+						Steps map[string]json.RawMessage `json:"steps"`
+					} `json:"result"`
+				}
+				if json.Unmarshal(resultData, &outer) == nil {
+					resultSteps = outer.Result.Steps
+				}
 			}
 		}
 	}
 
 	var steps []models.WorkflowStep
 	for _, def := range workflowStepDefs {
-		// When result is available, skip steps that don't exist in it.
-		if resultSteps != nil {
-			if _, ok := resultSteps[def.StepName]; !ok {
+		// For new format, only check execute flags (no step existence check)
+		if hasNewFormat {
+			// Skip steps whose execute flag is false
+			if def.ExecuteFlag != "" && !execFlags[def.ExecuteFlag] {
+				continue
+			}
+		} else {
+			// For old format, check both step existence and execute flags
+			if resultSteps != nil {
+				if _, ok := resultSteps[def.StepName]; !ok {
+					continue
+				}
+			}
+			if def.ExecuteFlag != "" && !execFlags[def.ExecuteFlag] {
 				continue
 			}
 		}
-		// Skip steps whose execute flag is false.
-		if def.ExecuteFlag != "" && !execFlags[def.ExecuteFlag] {
-			continue
-		}
-		displayName := translateStepName(def.StepName, wfArgs.Query)
+		
+		displayName := translateStepName(def.StepName, query)
 		if displayName == "" {
 			continue
 		}
@@ -344,6 +448,17 @@ func extractReferences(result interface{}) []models.Reference {
 		return nil
 	}
 
+	// Try new format first - direct final_references in result.result
+	var newFormat struct {
+		Result struct {
+			FinalReferences []refJSON `json:"final_references"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &newFormat); err == nil && len(newFormat.Result.FinalReferences) > 0 {
+		return deduplicateRefs(newFormat.Result.FinalReferences)
+	}
+
+	// Fallback to old format with steps
 	var outer struct {
 		Result struct {
 			Steps map[string]json.RawMessage `json:"steps"`
@@ -434,6 +549,53 @@ func deduplicateRefs(raw []refJSON) []models.Reference {
 		refs = append(refs, ref)
 	}
 	return refs
+}
+
+// extractHasResults extracts the hasResults boolean from a tool invocation result.
+func extractHasResults(result interface{}) *bool {
+	if result == nil {
+		return nil
+	}
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		return nil
+	}
+
+	// Try new format first - direct hasResults in result.result
+	var newFormat struct {
+		Result struct {
+			HasResults bool `json:"hasResults"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &newFormat); err == nil {
+		// Only return if hasResults field actually exists in the JSON
+		var checkExists map[string]interface{}
+		if json.Unmarshal(data, &checkExists) == nil {
+			if result, ok := checkExists["result"].(map[string]interface{}); ok {
+				if _, exists := result["hasResults"]; exists {
+					return &newFormat.Result.HasResults
+				}
+			}
+		}
+	}
+
+	// Try direct hasResults in result
+	var directFormat struct {
+		HasResults bool `json:"hasResults"`
+	}
+	if err := json.Unmarshal(data, &directFormat); err == nil {
+		// Only return if hasResults field actually exists in the JSON
+		var checkExists map[string]interface{}
+		if json.Unmarshal(data, &checkExists) == nil {
+			if _, exists := checkExists["hasResults"]; exists {
+				return &directFormat.HasResults
+			}
+		}
+	}
+
+	// Could add fallback to old format if needed, but for now just new format
+	return nil
 }
 
 // PauseStream cancels the active stream for the given thread.
