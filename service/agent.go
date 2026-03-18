@@ -292,7 +292,7 @@ func translateToolName(toolName string, args interface{}) string {
 		return "查詢理財市場趨勢與資產配置相關資訊"
 	case "agent-consultationProcessAgent":
 		if query != "" {
-			return fmt.Sprintf("查詢關於%s的專業醫療資訊", query)
+			return fmt.Sprintf("查詢關於%s的相關醫學資訊中", query)
 		}
 		return "查詢專業醫療資訊"
 	default:
