@@ -186,9 +186,10 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 			// Only emit workflow steps for non-workflow tools to avoid duplicates.
 			// Workflow steps will be emitted when actually executed via tool-output events.
 			if !strings.HasPrefix(chunk.Payload.ToolName, "workflow-") && chunk.Payload.ToolName != "" {
+				displayName := translateToolName(chunk.Payload.ToolName, chunk.Payload.Args)
 				_ = writer(&models.StreamEnvelope{
 					Event: models.StreamEventWorkflowStep,
-					Data:  models.WorkflowStep{ID: chunk.Payload.ToolCallID, DisplayName: chunk.Payload.ToolName},
+					Data:  models.WorkflowStep{ID: chunk.Payload.ToolCallID, DisplayName: displayName},
 				})
 			}
 
