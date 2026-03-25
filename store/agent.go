@@ -278,14 +278,14 @@ func (s *agentStore) ListMessages(ctx context.Context, threadID, userID, cursor 
 
 	if cursor != "" {
 		query += fmt.Sprintf(`
-		AND m."createdAt" > (SELECT "createdAt" FROM mastra_messages WHERE id = $%d)
+		AND m."createdAt" < (SELECT "createdAt" FROM mastra_messages WHERE id = $%d)
 		`, argIdx)
 		args = append(args, cursor)
 		argIdx++
 	}
 
 	query += fmt.Sprintf(`
-		ORDER BY m."createdAt" ASC
+		ORDER BY m."createdAt" DESC
 		LIMIT $%d
 	`, argIdx)
 	args = append(args, count+1)

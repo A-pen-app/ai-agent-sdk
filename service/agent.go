@@ -124,6 +124,11 @@ func (svc *agentService) ListMessages(ctx context.Context, threadID, userID, cur
 		last := data[len(data)-1].ID
 		resp.Next = &last
 	}
+
+	// Reverse to chronological order (ASC) for display
+	for i, j := 0, len(resp.Data)-1; i < j; i, j = i+1, j-1 {
+		resp.Data[i], resp.Data[j] = resp.Data[j], resp.Data[i]
+	}
 	return resp, nil
 }
 
