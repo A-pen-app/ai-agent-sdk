@@ -9,8 +9,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/A-pen-app/logging"
 	"github.com/A-pen-app/ai-agent-sdk/models"
+	"github.com/A-pen-app/logging"
+	"google.golang.org/api/idtoken"
 )
 
 // mastraChunk represents a single SSE JSON chunk from Mastra's /stream endpoint.
@@ -118,6 +119,21 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-user-id", userID)
+
+	// Attach Google ID token for Cloud Run authentication.
+	tokenSource, err := idtoken.NewTokenSource(ctx, svc.agentStreamURL)
+	if err != nil {
+		logging.Errorw(ctx, "Failed to create ID token source", "error", err)
+		sendStreamError(writer, "INTERNAL_ERROR", "failed to authenticate with AI service")
+		return nil, err
+	}
+	token, err := tokenSource.Token()
+	if err != nil {
+		logging.Errorw(ctx, "Failed to get ID token", "error", err)
+		sendStreamError(writer, "INTERNAL_ERROR", "failed to authenticate with AI service")
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
 
 	resp, err := svc.httpClient.Do(httpReq)
 	if err != nil {
