@@ -94,11 +94,13 @@ func (svc *agentService) StreamChat(ctx context.Context, userID string, req *mod
 // It returns collected references and any error encountered.
 func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, req *models.StreamRequest, writer StreamWriter) ([]models.Reference, error) {
 	// Build upstream request to pen-gpt Mastra agent.
-	// Uses the modern /stream endpoint which returns SSE-wrapped JSON chunks where
-	// all data is nested inside a "payload" object
-	// (e.g. data: {"type":"text-delta","payload":{"text":"..."}}). Memory context
-	// is passed via the memory object per agentExecutionBodySchema.
-	mastraURL := svc.agentStreamURL + "/api/agents/superJuniorAgent/stream"
+	//
+	// We hit the custom /custom/api/chat/stream endpoint (not Mastra's
+	// built-in /api/agents/:agentId/stream) so that PauseStream can abort
+	// the running agent.stream() out-of-band via /custom/api/chat/stop.
+	// The custom endpoint forwards the same SSE-wrapped JSON chunk format
+	// as the built-in route, so the parser below is unchanged.
+	mastraURL := svc.agentStreamURL + "/custom/api/chat/stream"
 	body := map[string]interface{}{
 		"messages": []map[string]string{{"role": "user", "content": req.Query}},
 		"memory": map[string]interface{}{
@@ -271,6 +273,61 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 	}
 
 	return refs, nil
+}
+
+// callRemoteStop calls Mastra's /custom/api/chat/stop endpoint to abort an
+// in-flight agent.stream() for the given thread. This is the application-
+// layer cancel signal that PauseStream relies on, since Cloud Run + HTTP/1.1
+// will not propagate the local TCP close to the Mastra container.
+//
+// Returns:
+//   - (true, nil)  : upstream confirmed an active stream was aborted
+//   - (false, nil) : upstream returned 200 but had no matching stream
+//   - (false, err) : transport, auth, or non-200 response
+func (svc *agentService) callRemoteStop(ctx context.Context, threadID, userID string) (bool, error) {
+	stopURL := svc.agentStreamURL + "/custom/api/chat/stop"
+
+	body, err := json.Marshal(map[string]string{"threadId": threadID})
+	if err != nil {
+		return false, fmt.Errorf("marshal stop body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, stopURL, bytes.NewReader(body))
+	if err != nil {
+		return false, fmt.Errorf("create stop request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-user-id", userID)
+
+	// Same Cloud Run ID token flow as doUpstreamStream — the stop endpoint
+	// sits behind the same Cloud Run service auth.
+	tokenSource, err := idtoken.NewTokenSource(ctx, svc.agentStreamURL)
+	if err != nil {
+		return false, fmt.Errorf("create id token source: %w", err)
+	}
+	token, err := tokenSource.Token()
+	if err != nil {
+		return false, fmt.Errorf("get id token: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+
+	resp, err := svc.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("call upstream stop: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("upstream stop returned status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Ok bool `json:"ok"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, fmt.Errorf("decode stop response: %w", err)
+	}
+	return result.Ok, nil
 }
 
 // filterThought strips <think>...</think> content from text deltas.

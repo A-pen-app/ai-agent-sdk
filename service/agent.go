@@ -603,26 +603,68 @@ func extractHasResults(result interface{}) *bool {
 	return nil
 }
 
-// PauseStream cancels the active stream for the given thread.
+// PauseStream cancels an in-flight stream for the given thread. It runs
+// two independent steps so a failure in one does not block the other:
+//
+//  1. Local cancel — releases the BFF's scanner loop and frees resources
+//     held by doUpstreamStream. Without this, the BFF would keep reading
+//     until the upstream connection naturally closes.
+//
+//  2. Remote stop — calls Mastra's /custom/api/chat/stop endpoint, which
+//     fires the AbortController inside the Mastra process and actually
+//     terminates the running agent.stream(). This is the only step that
+//     stops the LLM and prevents partial messages from being persisted to
+//     memory, because Cloud Run + HTTP/1.1 will not propagate the local
+//     TCP close to the Mastra container.
+//
+// Returns ErrorNotFound only if BOTH the local map and the upstream
+// registry had no matching stream — i.e. the stream genuinely does not
+// exist (already finished, never started, or wrong identifiers).
 func (svc *agentService) PauseStream(ctx context.Context, threadID, userID string) error {
+	// Step 1: local cancel.
+	localCancelled := svc.cancelLocalStream(threadID)
+
+	// Step 2: remote stop. Use a fresh bounded context so an already-
+	// expired parent ctx (e.g. the inbound request was already torn down)
+	// does not prevent us from reaching the upstream stop endpoint.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	remoteOk, remoteErr := svc.callRemoteStop(stopCtx, threadID, userID)
+
+	if remoteErr != nil {
+		logging.Errorw(ctx, "remote stop failed",
+			"thread_id", threadID,
+			"user_id", userID,
+			"local_cancelled", localCancelled,
+			"error", remoteErr)
+	}
+
+	// If neither side knew about this stream, surface a not-found so the
+	// caller can decide how to handle it (e.g. tell the user the stream
+	// was already finished).
+	if !localCancelled && !remoteOk && remoteErr == nil {
+		logging.Infow(ctx, "no active stream to pause",
+			"thread_id", threadID,
+			"user_id", userID,
+			"active_streams_count", len(svc.activeStreams))
+		return e.Wrap(e.ErrorNotFound, "no active stream found for thread")
+	}
+
+	return nil
+}
+
+// cancelLocalStream cancels the local request context for a stream and
+// removes the entry from the active streams map. Returns true if a
+// matching entry was found and cancelled.
+func (svc *agentService) cancelLocalStream(threadID string) bool {
 	svc.streamMutex.Lock()
 	defer svc.streamMutex.Unlock()
 
 	cancel, exists := svc.activeStreams[threadID]
 	if !exists {
-		logging.Errorw(ctx, "No active stream found for thread",
-			"thread_id", threadID,
-			"user_id", userID,
-			"active_streams_count", len(svc.activeStreams))
-		
-		return e.Wrap(e.ErrorNotFound, "no active stream found for thread")
+		return false
 	}
-
-	// Cancel the context to stop the stream
 	cancel()
-
-	// Remove from active streams map
 	delete(svc.activeStreams, threadID)
-
-	return nil
+	return true
 }
