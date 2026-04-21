@@ -6,12 +6,13 @@ import "time"
 
 // MastraThread maps to the mastra_threads table (camelCase columns).
 type MastraThread struct {
-	ID         string    `db:"id" json:"id"`
-	ResourceID string    `db:"resourceId" json:"resourceId"`
-	Title      string    `db:"title" json:"title"`
-	Metadata   *string   `db:"metadata" json:"metadata,omitempty"`
-	CreatedAt  time.Time `db:"createdAt" json:"createdAt"`
-	UpdatedAt  time.Time `db:"updatedAt" json:"updatedAt"`
+	ID         string     `db:"id" json:"id"`
+	ResourceID string     `db:"resourceId" json:"resourceId"`
+	Title      string     `db:"title" json:"title"`
+	Metadata   *string    `db:"metadata" json:"metadata,omitempty"`
+	CreatedAt  time.Time  `db:"createdAt" json:"createdAt"`
+	UpdatedAt  time.Time  `db:"updatedAt" json:"updatedAt"`
+	DeletedAt  *time.Time `db:"deletedAt" json:"deletedAt,omitempty"`
 }
 
 // MastraMessage maps to the mastra_messages table (camelCase columns).

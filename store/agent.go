@@ -30,6 +30,7 @@ func (s *agentStore) ListThreads(ctx context.Context, userID, cursor string, cou
 			FROM mastra_threads t
 			LEFT JOIN thread_pin p ON p.thread_id = t.id AND p.user_id = $1
 			WHERE t."resourceId" = $1
+			AND t."deletedAt" IS NULL
 		)
 		SELECT id, title, is_pinned
 		FROM threads
@@ -74,6 +75,7 @@ func (s *agentStore) SearchThreads(ctx context.Context, userID, keyword, cursor 
 			FROM mastra_threads t
 			LEFT JOIN thread_pin p ON p.thread_id = t.id AND p.user_id = $1
 			WHERE t."resourceId" = $1
+			AND t."deletedAt" IS NULL
 			AND t.title ILIKE '%' || $2 || '%'
 		)
 		SELECT id, title, is_pinned
@@ -139,7 +141,7 @@ func (s *agentStore) GetThread(ctx context.Context, threadID, userID string) (*m
 			COALESCE(p.is_deleted = false, false) AS is_pinned
 		FROM mastra_threads t
 		LEFT JOIN thread_pin p ON p.thread_id = t.id AND p.user_id = $1
-		WHERE t.id = $2 AND t."resourceId" = $1
+		WHERE t.id = $2 AND t."resourceId" = $1 AND t."deletedAt" IS NULL
 	`
 	var thread models.ThreadWithPin
 	err := s.db.Get(&thread, query, userID, threadID)
@@ -157,43 +159,42 @@ func (s *agentStore) GetThread(ctx context.Context, threadID, userID string) (*m
 }
 
 func (s *agentStore) DeleteThread(ctx context.Context, threadID, userID string) error {
-	// Delete the thread (only if owned by user).
-	result, err := s.db.Exec(`DELETE FROM mastra_threads WHERE id = $1 AND "resourceId" = $2`, threadID, userID)
+	// Soft delete: set deletedAt timestamp instead of removing the row.
+	result, err := s.db.Exec(
+		`UPDATE mastra_threads SET "deletedAt" = NOW() WHERE id = $1 AND "resourceId" = $2 AND "deletedAt" IS NULL`,
+		threadID, userID,
+	)
 	if err != nil {
-		logging.Errorw(ctx, "Failed to delete thread - database error",
+		logging.Errorw(ctx, "Failed to soft delete thread - database error",
 			"thread_id", threadID,
 			"user_id", userID,
 			"error", err.Error())
 		return err
 	}
-	
+
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		logging.Errorw(ctx, "Failed to get affected rows after delete",
+		logging.Errorw(ctx, "Failed to get affected rows after soft delete",
 			"thread_id", threadID,
 			"user_id", userID,
 			"error", err.Error())
 		return err
 	}
-	
+
 	if rowsAffected == 0 {
 		logging.Errorw(ctx, "Thread not found for deletion or access denied",
 			"thread_id", threadID,
 			"user_id", userID,
 			"rows_affected", rowsAffected)
-		
+
 		return e.Wrap(e.ErrorNotFound, "thread not found or not owned by user")
 	}
-	
-	// Delete related records.
-	_, _ = s.db.Exec(`DELETE FROM mastra_messages WHERE thread_id = $1`, threadID)
-	_, _ = s.db.Exec(`DELETE FROM thread_pin WHERE thread_id = $1 AND user_id = $2`, threadID, userID)
-	_, _ = s.db.Exec(`DELETE FROM response_feedback WHERE thread_id = $1 AND user_id = $2`, threadID, userID)
+
 	return nil
 }
 
 func (s *agentStore) UpdateThread(ctx context.Context, threadID, userID, title string) error {
-	query := `UPDATE mastra_threads SET title = $1, "updatedAt" = NOW() WHERE id = $2 AND "resourceId" = $3`
+	query := `UPDATE mastra_threads SET title = $1, "updatedAt" = NOW() WHERE id = $2 AND "resourceId" = $3 AND "deletedAt" IS NULL`
 	result, err := s.db.Exec(query, title, threadID, userID)
 	if err != nil {
 		logging.Errorw(ctx, "Failed to update thread - database error",
