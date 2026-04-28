@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -667,4 +668,180 @@ func (svc *agentService) cancelLocalStream(threadID string) bool {
 	cancel()
 	delete(svc.activeStreams, threadID)
 	return true
+}
+
+// extractTextContent parses V2 content format and extracts plain text.
+// If the content is not V2 format, it returns the raw content as-is.
+func extractTextContent(content string) string {
+	var v2 models.MastraContentV2
+	if err := json.Unmarshal([]byte(content), &v2); err != nil || v2.Format == 0 {
+		return content
+	}
+	var parts []string
+	for _, part := range v2.Parts {
+		if part.Type == "text" && part.Text != "" {
+			parts = append(parts, part.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (svc *agentService) CreateShareLink(ctx context.Context, threadID, userID string) (*models.ShareLinkResponse, error) {
+	// Verify thread ownership
+	_, err := svc.s.GetThread(ctx, threadID, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	shareLink := &models.ShareLink{
+		ID:        uuid.New().String(),
+		ThreadID:  threadID,
+		UserID:    userID,
+		Status:    "active",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := svc.s.CreateShareLink(ctx, shareLink); err != nil {
+		return nil, err
+	}
+
+	return &models.ShareLinkResponse{
+		ID:        shareLink.ID,
+		ThreadID:  shareLink.ThreadID,
+		CreatedAt: shareLink.CreatedAt,
+	}, nil
+}
+
+func (svc *agentService) RevokeShareLinks(ctx context.Context, threadID, userID string) error {
+	_, err := svc.s.GetThread(ctx, threadID, userID)
+	if err != nil {
+		return err
+	}
+	return svc.s.RevokeShareLinks(ctx, threadID, userID)
+}
+
+func (svc *agentService) GetShareLink(ctx context.Context, id string) (*models.ShareLinkDetail, error) {
+	link, err := svc.s.GetShareLink(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &models.ShareLinkDetail{
+		ID:        link.ID,
+		ThreadID:  link.ThreadID,
+		UserID:    link.UserID,
+		Status:    link.Status,
+		DeletedAt: link.DeletedAt,
+		CreatedAt: link.CreatedAt,
+	}, nil
+}
+
+func (svc *agentService) ListSharedMessages(ctx context.Context, id, cursor string, count int) (*models.SharedMessageListResponse, error) {
+	link, err := svc.s.GetShareLink(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if link.Status != "active" || link.DeletedAt != nil {
+		return nil, e.Wrap(e.ErrorNotFound, "share link is revoked")
+	}
+
+	rows, err := svc.s.ListSharedMessages(ctx, link.ThreadID, link.CreatedAt, cursor, count)
+	if err != nil {
+		return nil, err
+	}
+
+	hasMore := len(rows) > count
+	if hasMore {
+		rows = rows[:count]
+	}
+
+	data := make([]models.SharedMessageResponse, len(rows))
+	for i, row := range rows {
+		content := extractTextContent(row.Content)
+		data[i] = models.SharedMessageResponse{
+			ID:        row.ID,
+			Role:      row.Role,
+			Content:   content,
+			CreatedAt: row.CreatedAt,
+		}
+	}
+
+	var next *string
+	if hasMore && len(data) > 0 {
+		last := data[len(data)-1].ID
+		next = &last
+	}
+
+	return &models.SharedMessageListResponse{
+		Data:    data,
+		HasMore: hasMore,
+		Next:    next,
+	}, nil
+}
+
+func (svc *agentService) ForkThread(ctx context.Context, id, newOwnerID string) (*models.ForkThreadResponse, error) {
+	link, err := svc.s.GetShareLink(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if link.Status != "active" || link.DeletedAt != nil {
+		return nil, e.Wrap(e.ErrorNotFound, "share link is revoked")
+	}
+
+	forkURL := svc.agentStreamURL + "/custom/api/thread/fork"
+	body := map[string]string{
+		"sourceThreadId": link.ThreadID,
+		"endDate":        link.CreatedAt.Format(time.RFC3339Nano),
+	}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal fork request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", forkURL, bytes.NewReader(bodyJSON))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create fork request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-user-id", newOwnerID)
+
+	resp, err := svc.httpClient.Do(req)
+	if err != nil {
+		logging.Errorw(ctx, "Failed to call fork API",
+			"error", err.Error(),
+			"share_link_id", id)
+		return nil, fmt.Errorf("failed to call fork API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fork API returned status %d", resp.StatusCode)
+	}
+
+	var forkResp struct {
+		Success            bool        `json:"success"`
+		Thread             interface{} `json:"thread"`
+		ClonedMessageCount int         `json:"clonedMessageCount"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&forkResp); err != nil {
+		return nil, fmt.Errorf("failed to decode fork response: %w", err)
+	}
+
+	threadMap, ok := forkResp.Thread.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected fork response thread format")
+	}
+
+	threadID, _ := threadMap["id"].(string)
+	title, _ := threadMap["title"].(string)
+
+	return &models.ForkThreadResponse{
+		ThreadID: threadID,
+		Title:    title,
+	}, nil
+}
+
+func (svc *agentService) UpdateShareLinkShortCode(ctx context.Context, id, shortCode string) error {
+	return svc.s.UpdateShareLinkShortCode(ctx, id, shortCode)
 }

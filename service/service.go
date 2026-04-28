@@ -21,4 +21,12 @@ type Agent interface {
 	UpsertFeedback(ctx context.Context, userID, messageID, feedback string) error
 	StreamChat(ctx context.Context, userID string, req *models.StreamRequest, writer StreamWriter) error
 	PauseStream(ctx context.Context, threadID, userID string) error
+
+	// Share
+	CreateShareLink(ctx context.Context, threadID, userID string) (*models.ShareLinkResponse, error)
+	RevokeShareLinks(ctx context.Context, threadID, userID string) error
+	GetShareLink(ctx context.Context, id string) (*models.ShareLinkDetail, error)
+	ListSharedMessages(ctx context.Context, id, cursor string, count int) (*models.SharedMessageListResponse, error)
+	ForkThread(ctx context.Context, id, newOwnerID string) (*models.ForkThreadResponse, error)
+	UpdateShareLinkShortCode(ctx context.Context, id, shortCode string) error
 }

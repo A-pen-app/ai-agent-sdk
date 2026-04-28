@@ -42,6 +42,18 @@ type ResponseFeedback struct {
 	UpdatedAt    *time.Time `db:"updated_at" json:"updated_at,omitempty"`
 }
 
+// ShareLink maps to the share_links table.
+type ShareLink struct {
+	ID        string     `db:"id" json:"id"`
+	ThreadID  string     `db:"thread_id" json:"thread_id"`
+	UserID    string     `db:"user_id" json:"user_id"`
+	Status    string     `db:"status" json:"status"`
+	ShortCode *string    `db:"short_code" json:"short_code,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"created_at"`
+	DeletedAt *time.Time `db:"deleted_at" json:"deleted_at,omitempty"`
+	UpdatedAt time.Time  `db:"updated_at" json:"updated_at"`
+}
+
 // --- Joined query structs ---
 
 // ThreadWithPin is the result of joining mastra_threads with thread_pin.
@@ -130,6 +142,44 @@ type SuccessResponse struct {
 	Success bool `json:"success"`
 }
 
+// ShareLinkResponse is the API response for creating a share link.
+type ShareLinkResponse struct {
+	ID        string    `json:"id"`
+	ThreadID  string    `json:"thread_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ShareLinkDetail is the full share link info for querying.
+type ShareLinkDetail struct {
+	ID        string     `json:"id"`
+	ThreadID  string     `json:"thread_id"`
+	UserID    string     `json:"user_id"`
+	Status    string     `json:"status"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+// SharedMessageResponse is a single message in the shared messages response.
+type SharedMessageResponse struct {
+	ID        string    `json:"id"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// SharedMessageListResponse is the paginated shared message list response.
+type SharedMessageListResponse struct {
+	Data    []SharedMessageResponse `json:"data"`
+	HasMore bool                    `json:"has_more"`
+	Next    *string                 `json:"next"`
+}
+
+// ForkThreadResponse is the response for fork thread API.
+type ForkThreadResponse struct {
+	ThreadID string `json:"thread_id"`
+	Title    string `json:"title"`
+}
+
 // --- API request structs ---
 
 // CreateThreadRequest is the request body for creating a thread.
@@ -147,6 +197,11 @@ type UpdateThreadRequest struct {
 type StreamRequest struct {
 	ThreadID string `json:"thread_id"` // ThreadID now comes from URL path parameter, not required in JSON
 	Query    string `json:"query" binding:"required"`
+}
+
+// RevokeShareRequest is the request body for revoking a share.
+type RevokeShareRequest struct {
+	Status string `json:"status" binding:"required,oneof=revoked"`
 }
 
 // --- SSE stream types ---

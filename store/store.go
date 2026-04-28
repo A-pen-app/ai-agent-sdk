@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"time"
+
 	"github.com/A-pen-app/ai-agent-sdk/models"
 )
 
@@ -15,4 +17,11 @@ type Agent interface {
 	UpdateThreadPin(ctx context.Context, userID, threadID string, isPinned bool) error
 	ListMessages(ctx context.Context, threadID, userID, cursor string, count int) ([]models.MessageWithFeedback, error)
 	UpsertFeedback(ctx context.Context, userID, messageID, feedback string) error
+
+	// Share
+	CreateShareLink(ctx context.Context, shareLink *models.ShareLink) error
+	GetShareLink(ctx context.Context, id string) (*models.ShareLink, error)
+	RevokeShareLinks(ctx context.Context, threadID, userID string) error
+	ListSharedMessages(ctx context.Context, threadID string, endDate time.Time, cursor string, count int) ([]models.MessageWithFeedback, error)
+	UpdateShareLinkShortCode(ctx context.Context, id, shortCode string) error
 }
