@@ -123,19 +123,12 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 	httpReq.Header.Set("x-user-id", userID)
 
 	// Attach Google ID token for Cloud Run authentication.
-	tokenSource, err := idtoken.NewTokenSource(ctx, svc.agentStreamURL)
-	if err != nil {
-		logging.Errorw(ctx, "Failed to create ID token source", "error", err)
-		sendStreamError(writer, "INTERNAL_ERROR", "failed to authenticate with AI service")
-		return nil, err
+	// Skip gracefully when running locally with authorized_user credentials.
+	if ts, err := idtoken.NewTokenSource(ctx, svc.agentStreamURL); err == nil {
+		if token, err := ts.Token(); err == nil {
+			httpReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
+		}
 	}
-	token, err := tokenSource.Token()
-	if err != nil {
-		logging.Errorw(ctx, "Failed to get ID token", "error", err)
-		sendStreamError(writer, "INTERNAL_ERROR", "failed to authenticate with AI service")
-		return nil, err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
 
 	resp, err := svc.httpClient.Do(httpReq)
 	if err != nil {
@@ -299,17 +292,12 @@ func (svc *agentService) callRemoteStop(ctx context.Context, threadID, userID st
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-user-id", userID)
 
-	// Same Cloud Run ID token flow as doUpstreamStream — the stop endpoint
-	// sits behind the same Cloud Run service auth.
-	tokenSource, err := idtoken.NewTokenSource(ctx, svc.agentStreamURL)
-	if err != nil {
-		return false, fmt.Errorf("create id token source: %w", err)
+	// Same Cloud Run ID token flow as doUpstreamStream.
+	if ts, err := idtoken.NewTokenSource(ctx, svc.agentStreamURL); err == nil {
+		if token, err := ts.Token(); err == nil {
+			req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+		}
 	}
-	token, err := tokenSource.Token()
-	if err != nil {
-		return false, fmt.Errorf("get id token: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 
 	resp, err := svc.httpClient.Do(req)
 	if err != nil {

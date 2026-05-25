@@ -24,7 +24,6 @@ type Agent interface {
 
 	// Share
 	CreateShareLink(ctx context.Context, threadID, userID string) (*models.ShareLinkResponse, error)
-	RevokeShareLinks(ctx context.Context, threadID, userID string) error
 	GetShareLink(ctx context.Context, id string) (*models.ShareLinkDetail, error)
 	ListSharedMessages(ctx context.Context, id, cursor string, count int) (*models.SharedMessageListResponse, error)
 	ForkThread(ctx context.Context, id, newOwnerID string) (*models.ForkThreadResponse, error)

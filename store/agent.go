@@ -347,14 +347,14 @@ func (s *agentStore) UpsertFeedback(ctx context.Context, userID, messageID, feed
 
 func (s *agentStore) CreateShareLink(ctx context.Context, shareLink *models.ShareLink) error {
 	query := `
-		INSERT INTO share_links (id, thread_id, user_id, status, created_at, updated_at)
-		VALUES (:id, :thread_id, :user_id, :status, :created_at, :updated_at)
+		INSERT INTO share_links (id, type, reference_id, user_id, created_at, updated_at)
+		VALUES (:id, :type, :reference_id, :user_id, :created_at, :updated_at)
 	`
 	_, err := s.db.NamedExec(query, shareLink)
 	if err != nil {
 		logging.Errorw(ctx, "Failed to create share link",
 			"id", shareLink.ID,
-			"thread_id", shareLink.ThreadID,
+			"reference_id", shareLink.ReferenceID,
 			"error", err.Error())
 		return err
 	}
@@ -362,7 +362,7 @@ func (s *agentStore) CreateShareLink(ctx context.Context, shareLink *models.Shar
 }
 
 func (s *agentStore) GetShareLink(ctx context.Context, id string) (*models.ShareLink, error) {
-	query := `SELECT id, thread_id, user_id, status, short_code, created_at, deleted_at, updated_at FROM share_links WHERE id = $1`
+	query := `SELECT id, type, reference_id, user_id, short_code, created_at, deleted_at, updated_at FROM share_links WHERE id = $1`
 	var link models.ShareLink
 	err := s.db.Get(&link, query, id)
 	if err != nil {
@@ -372,23 +372,6 @@ func (s *agentStore) GetShareLink(ctx context.Context, id string) (*models.Share
 		return nil, e.Wrap(e.ErrorNotFound, "share link not found")
 	}
 	return &link, nil
-}
-
-func (s *agentStore) RevokeShareLinks(ctx context.Context, threadID, userID string) error {
-	query := `
-		UPDATE share_links
-		SET status = 'revoked', deleted_at = NOW(), updated_at = NOW()
-		WHERE thread_id = $1 AND user_id = $2 AND status = 'active' AND deleted_at IS NULL
-	`
-	_, err := s.db.Exec(query, threadID, userID)
-	if err != nil {
-		logging.Errorw(ctx, "Failed to revoke share links",
-			"thread_id", threadID,
-			"user_id", userID,
-			"error", err.Error())
-		return err
-	}
-	return nil
 }
 
 func (s *agentStore) ListSharedMessages(ctx context.Context, threadID string, endDate time.Time, cursor string, count int) ([]models.MessageWithFeedback, error) {

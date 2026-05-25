@@ -21,7 +21,6 @@ type Agent interface {
 	// Share
 	CreateShareLink(ctx context.Context, shareLink *models.ShareLink) error
 	GetShareLink(ctx context.Context, id string) (*models.ShareLink, error)
-	RevokeShareLinks(ctx context.Context, threadID, userID string) error
 	ListSharedMessages(ctx context.Context, threadID string, endDate time.Time, cursor string, count int) ([]models.MessageWithFeedback, error)
 	UpdateShareLinkShortCode(ctx context.Context, id, shortCode string) error
 }

@@ -695,12 +695,12 @@ func (svc *agentService) CreateShareLink(ctx context.Context, threadID, userID s
 
 	now := time.Now().UTC()
 	shareLink := &models.ShareLink{
-		ID:        uuid.New().String(),
-		ThreadID:  threadID,
-		UserID:    userID,
-		Status:    "active",
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          uuid.New().String(),
+		Type:        models.ShareLinkTypeAIThread,
+		ReferenceID: threadID,
+		UserID:      userID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 
 	if err := svc.s.CreateShareLink(ctx, shareLink); err != nil {
@@ -709,17 +709,9 @@ func (svc *agentService) CreateShareLink(ctx context.Context, threadID, userID s
 
 	return &models.ShareLinkResponse{
 		ID:        shareLink.ID,
-		ThreadID:  shareLink.ThreadID,
+		ThreadID:  shareLink.ReferenceID,
 		CreatedAt: shareLink.CreatedAt,
 	}, nil
-}
-
-func (svc *agentService) RevokeShareLinks(ctx context.Context, threadID, userID string) error {
-	_, err := svc.s.GetThread(ctx, threadID, userID)
-	if err != nil {
-		return err
-	}
-	return svc.s.RevokeShareLinks(ctx, threadID, userID)
 }
 
 func (svc *agentService) GetShareLink(ctx context.Context, id string) (*models.ShareLinkDetail, error) {
@@ -728,12 +720,12 @@ func (svc *agentService) GetShareLink(ctx context.Context, id string) (*models.S
 		return nil, err
 	}
 	return &models.ShareLinkDetail{
-		ID:        link.ID,
-		ThreadID:  link.ThreadID,
-		UserID:    link.UserID,
-		Status:    link.Status,
-		DeletedAt: link.DeletedAt,
-		CreatedAt: link.CreatedAt,
+		ID:          link.ID,
+		Type:        link.Type,
+		ReferenceID: link.ReferenceID,
+		UserID:      link.UserID,
+		DeletedAt:   link.DeletedAt,
+		CreatedAt:   link.CreatedAt,
 	}, nil
 }
 
@@ -742,11 +734,11 @@ func (svc *agentService) ListSharedMessages(ctx context.Context, id, cursor stri
 	if err != nil {
 		return nil, err
 	}
-	if link.Status != "active" || link.DeletedAt != nil {
-		return nil, e.Wrap(e.ErrorNotFound, "share link is revoked")
+	if link.DeletedAt != nil {
+		return nil, e.Wrap(e.ErrorNotFound, "share link not found")
 	}
 
-	rows, err := svc.s.ListSharedMessages(ctx, link.ThreadID, link.CreatedAt, cursor, count)
+	rows, err := svc.s.ListSharedMessages(ctx, link.ReferenceID, link.CreatedAt, cursor, count)
 	if err != nil {
 		return nil, err
 	}
@@ -785,13 +777,13 @@ func (svc *agentService) ForkThread(ctx context.Context, id, newOwnerID string) 
 	if err != nil {
 		return nil, err
 	}
-	if link.Status != "active" || link.DeletedAt != nil {
-		return nil, e.Wrap(e.ErrorNotFound, "share link is revoked")
+	if link.DeletedAt != nil {
+		return nil, e.Wrap(e.ErrorNotFound, "share link not found")
 	}
 
 	forkURL := svc.agentStreamURL + "/custom/api/thread/fork"
 	body := map[string]string{
-		"sourceThreadId": link.ThreadID,
+		"sourceThreadId": link.ReferenceID,
 		"endDate":        link.CreatedAt.Format(time.RFC3339Nano),
 	}
 	bodyJSON, err := json.Marshal(body)
