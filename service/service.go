@@ -22,9 +22,14 @@ type Agent interface {
 	StreamChat(ctx context.Context, userID string, req *models.StreamRequest, writer StreamWriter) error
 	PauseStream(ctx context.Context, threadID, userID string) error
 
-	// Share
-	CreateShareLink(ctx context.Context, threadID, userID string) (*models.ShareLinkResponse, error)
-	GetShareLink(ctx context.Context, id string) (*models.ShareLinkDetail, error)
+	Share
+}
+
+// Share exposes share-link operations: creating links, reading shared
+// messages, forking a shared thread, and rotating a link's short code.
+type Share interface {
+	CreateShareLink(ctx context.Context, threadID, userID string) (*models.ShareLink, error)
+	GetShareLink(ctx context.Context, id string) (*models.ShareLink, error)
 	ListSharedMessages(ctx context.Context, id, cursor string, count int) (*models.SharedMessageListResponse, error)
 	ForkThread(ctx context.Context, id, newOwnerID string) (*models.ForkThreadResponse, error)
 	UpdateShareLinkShortCode(ctx context.Context, id, shortCode string) error

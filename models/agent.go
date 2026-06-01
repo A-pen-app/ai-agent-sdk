@@ -54,11 +54,11 @@ type ShareLink struct {
 	ID          string        `db:"id" json:"id"`
 	Type        ShareLinkType `db:"type" json:"type"`
 	ReferenceID string        `db:"reference_id" json:"reference_id"`
-	UserID      string        `db:"user_id" json:"user_id"`
-	ShortCode   *string       `db:"short_code" json:"short_code,omitempty"`
+	UserID      string        `db:"user_id" json:"-"`
+	ShortCode   *string       `db:"short_code" json:"-"`
 	CreatedAt   time.Time     `db:"created_at" json:"created_at"`
-	DeletedAt   *time.Time    `db:"deleted_at" json:"deleted_at,omitempty"`
-	UpdatedAt   time.Time     `db:"updated_at" json:"updated_at"`
+	DeletedAt   *time.Time    `db:"deleted_at" json:"-"`
+	UpdatedAt   time.Time     `db:"updated_at" json:"-"`
 }
 
 // --- Joined query structs ---
@@ -149,36 +149,6 @@ type SuccessResponse struct {
 	Success bool `json:"success"`
 }
 
-// ShareLinkResponse is the API response for creating a share link.
-type ShareLinkResponse struct {
-	ID        string    `json:"id"`
-	ThreadID  string    `json:"thread_id"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// CreateShareLinkResponse is the API response for POST /ai/gpt/threads/:thread_id/share.
-type CreateShareLinkResponse struct {
-	ID       string `json:"id"`
-	ShareURL string `json:"share_url"`
-}
-
-// GetShareLinkResponse is the API response for GET /ai/gpt/share/:id.
-type GetShareLinkResponse struct {
-	ID          string `json:"id"`
-	ThreadTitle string `json:"thread_title"`
-	CreatedAt   int64  `json:"created_at"`
-}
-
-// ShareLinkDetail is the full share link info for querying.
-type ShareLinkDetail struct {
-	ID          string        `json:"id"`
-	Type        ShareLinkType `json:"type"`
-	ReferenceID string        `json:"reference_id"`
-	UserID      string        `json:"user_id"`
-	DeletedAt   *time.Time    `json:"deleted_at,omitempty"`
-	CreatedAt   time.Time     `json:"created_at"`
-}
-
 // SharedMessageResponse is a single message in the shared messages response.
 type SharedMessageResponse struct {
 	ID        string    `json:"id"`
@@ -192,6 +162,19 @@ type SharedMessageListResponse struct {
 	Data    []SharedMessageResponse `json:"data"`
 	HasMore bool                    `json:"has_more"`
 	Next    *string                 `json:"next"`
+}
+
+// CreateShareLinkResponse is the response for creating a share link.
+type CreateShareLinkResponse struct {
+	ID       string `json:"id"`
+	ShareURL string `json:"share_url"`
+}
+
+// GetShareLinkResponse is the response for getting share link info.
+type GetShareLinkResponse struct {
+	ID          string `json:"id"`
+	ThreadTitle string `json:"thread_title"`
+	CreatedAt   int64  `json:"created_at"`
 }
 
 // ForkThreadResponse is the response for fork thread API.

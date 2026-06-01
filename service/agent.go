@@ -686,10 +686,9 @@ func extractTextContent(content string) string {
 	return strings.Join(parts, "\n")
 }
 
-func (svc *agentService) CreateShareLink(ctx context.Context, threadID, userID string) (*models.ShareLinkResponse, error) {
+func (svc *agentService) CreateShareLink(ctx context.Context, threadID, userID string) (*models.ShareLink, error) {
 	// Verify thread ownership
-	_, err := svc.s.GetThread(ctx, threadID, userID)
-	if err != nil {
+	if _, err := svc.s.GetThread(ctx, threadID, userID); err != nil {
 		return nil, err
 	}
 
@@ -707,26 +706,15 @@ func (svc *agentService) CreateShareLink(ctx context.Context, threadID, userID s
 		return nil, err
 	}
 
-	return &models.ShareLinkResponse{
-		ID:        shareLink.ID,
-		ThreadID:  shareLink.ReferenceID,
-		CreatedAt: shareLink.CreatedAt,
-	}, nil
+	return shareLink, nil
 }
 
-func (svc *agentService) GetShareLink(ctx context.Context, id string) (*models.ShareLinkDetail, error) {
+func (svc *agentService) GetShareLink(ctx context.Context, id string) (*models.ShareLink, error) {
 	link, err := svc.s.GetShareLink(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return &models.ShareLinkDetail{
-		ID:          link.ID,
-		Type:        link.Type,
-		ReferenceID: link.ReferenceID,
-		UserID:      link.UserID,
-		DeletedAt:   link.DeletedAt,
-		CreatedAt:   link.CreatedAt,
-	}, nil
+	return link, nil
 }
 
 func (svc *agentService) ListSharedMessages(ctx context.Context, id, cursor string, count int) (*models.SharedMessageListResponse, error) {
@@ -735,7 +723,7 @@ func (svc *agentService) ListSharedMessages(ctx context.Context, id, cursor stri
 		return nil, err
 	}
 	if link.DeletedAt != nil {
-		return nil, e.Wrap(e.ErrorNotFound, "share link not found")
+		return nil, e.ErrorNotFound
 	}
 
 	rows, err := svc.s.ListSharedMessages(ctx, link.ReferenceID, link.CreatedAt, cursor, count)
@@ -778,7 +766,7 @@ func (svc *agentService) ForkThread(ctx context.Context, id, newOwnerID string) 
 		return nil, err
 	}
 	if link.DeletedAt != nil {
-		return nil, e.Wrap(e.ErrorNotFound, "share link not found")
+		return nil, e.ErrorNotFound
 	}
 
 	forkURL := svc.agentStreamURL + "/custom/api/thread/fork"

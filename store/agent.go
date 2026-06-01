@@ -350,8 +350,7 @@ func (s *agentStore) CreateShareLink(ctx context.Context, shareLink *models.Shar
 		INSERT INTO share_links (id, type, reference_id, user_id, created_at, updated_at)
 		VALUES (:id, :type, :reference_id, :user_id, :created_at, :updated_at)
 	`
-	_, err := s.db.NamedExec(query, shareLink)
-	if err != nil {
+	if _, err := s.db.NamedExec(query, shareLink); err != nil {
 		logging.Errorw(ctx, "Failed to create share link",
 			"id", shareLink.ID,
 			"reference_id", shareLink.ReferenceID,
@@ -364,8 +363,7 @@ func (s *agentStore) CreateShareLink(ctx context.Context, shareLink *models.Shar
 func (s *agentStore) GetShareLink(ctx context.Context, id string) (*models.ShareLink, error) {
 	query := `SELECT id, type, reference_id, user_id, short_code, created_at, deleted_at, updated_at FROM share_links WHERE id = $1`
 	var link models.ShareLink
-	err := s.db.Get(&link, query, id)
-	if err != nil {
+	if err := s.db.Get(&link, query, id); err != nil {
 		logging.Errorw(ctx, "Share link not found",
 			"id", id,
 			"error", err.Error())
@@ -416,8 +414,7 @@ func (s *agentStore) ListSharedMessages(ctx context.Context, threadID string, en
 
 func (s *agentStore) UpdateShareLinkShortCode(ctx context.Context, id, shortCode string) error {
 	query := `UPDATE share_links SET short_code = $1, updated_at = NOW() WHERE id = $2`
-	_, err := s.db.Exec(query, shortCode, id)
-	if err != nil {
+	if _, err := s.db.Exec(query, shortCode, id); err != nil {
 		logging.Errorw(ctx, "Failed to update share link short code",
 			"id", id,
 			"error", err.Error())
