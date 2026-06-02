@@ -35,6 +35,10 @@ func NewShare(s store.Agent, agentStreamURL string, httpClient *http.Client) Sha
 func (svc *shareService) CreateShareLink(ctx context.Context, threadID, userID string) (*models.ShareLink, error) {
 	// Verify thread ownership
 	if _, err := svc.s.GetThread(ctx, threadID, userID); err != nil {
+		logging.Infow(ctx, "share link creation denied: thread ownership check failed",
+			"thread_id", threadID,
+			"user_id", userID,
+			"error", err.Error())
 		return nil, err
 	}
 
@@ -49,9 +53,17 @@ func (svc *shareService) CreateShareLink(ctx context.Context, threadID, userID s
 	}
 
 	if err := svc.s.CreateShareLink(ctx, shareLink); err != nil {
+		logging.Errorw(ctx, "failed to create share link",
+			"thread_id", threadID,
+			"user_id", userID,
+			"error", err.Error())
 		return nil, err
 	}
 
+	logging.Infow(ctx, "share link created",
+		"share_link_id", shareLink.ID,
+		"thread_id", threadID,
+		"user_id", userID)
 	return shareLink, nil
 }
 
@@ -69,6 +81,8 @@ func (svc *shareService) ListSharedMessages(ctx context.Context, id, cursor stri
 		return nil, err
 	}
 	if link.DeletedAt != nil {
+		logging.Infow(ctx, "attempt to read messages of a deleted share link",
+			"share_link_id", id)
 		return nil, e.ErrorNotFound
 	}
 
@@ -112,6 +126,9 @@ func (svc *shareService) ForkThread(ctx context.Context, id, newOwnerID string) 
 		return nil, err
 	}
 	if link.DeletedAt != nil {
+		logging.Infow(ctx, "attempt to fork a deleted share link",
+			"share_link_id", id,
+			"new_owner_id", newOwnerID)
 		return nil, e.ErrorNotFound
 	}
 
@@ -142,6 +159,10 @@ func (svc *shareService) ForkThread(ctx context.Context, id, newOwnerID string) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		logging.Errorw(ctx, "fork API returned non-OK status",
+			"status_code", resp.StatusCode,
+			"share_link_id", id,
+			"new_owner_id", newOwnerID)
 		return nil, fmt.Errorf("fork API returned status %d", resp.StatusCode)
 	}
 
@@ -151,17 +172,28 @@ func (svc *shareService) ForkThread(ctx context.Context, id, newOwnerID string) 
 		ClonedMessageCount int         `json:"clonedMessageCount"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&forkResp); err != nil {
+		logging.Errorw(ctx, "failed to decode fork response",
+			"share_link_id", id,
+			"error", err.Error())
 		return nil, fmt.Errorf("failed to decode fork response: %w", err)
 	}
 
 	threadMap, ok := forkResp.Thread.(map[string]interface{})
 	if !ok {
+		logging.Errorw(ctx, "unexpected fork response thread format",
+			"share_link_id", id)
 		return nil, fmt.Errorf("unexpected fork response thread format")
 	}
 
 	threadID, _ := threadMap["id"].(string)
 	title, _ := threadMap["title"].(string)
 
+	logging.Infow(ctx, "shared thread forked",
+		"share_link_id", id,
+		"source_thread_id", link.ReferenceID,
+		"new_thread_id", threadID,
+		"new_owner_id", newOwnerID,
+		"cloned_message_count", forkResp.ClonedMessageCount)
 	return &models.ForkThreadResponse{
 		ThreadID: threadID,
 		Title:    title,
@@ -169,5 +201,10 @@ func (svc *shareService) ForkThread(ctx context.Context, id, newOwnerID string) 
 }
 
 func (svc *shareService) UpdateShareLinkShortCode(ctx context.Context, id, shortCode string) error {
-	return svc.s.UpdateShareLinkShortCode(ctx, id, shortCode)
+	if err := svc.s.UpdateShareLinkShortCode(ctx, id, shortCode); err != nil {
+		return err
+	}
+	logging.Infow(ctx, "share link short code updated",
+		"share_link_id", id)
+	return nil
 }
