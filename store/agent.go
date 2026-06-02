@@ -267,6 +267,11 @@ func (s *agentStore) UpdateThreadPin(ctx context.Context, userID, threadID strin
 }
 
 func (s *agentStore) ListMessages(ctx context.Context, threadID, userID, cursor string, count int) ([]models.MessageWithFeedback, error) {
+	// Use COALESCE(m."createdAtZ", m."createdAt") everywhere a timestamp is read,
+	// ordered or paginated on: "createdAtZ" is the timezone-correct UTC instant,
+	// while the legacy "createdAt" (timestamp WITHOUT time zone) holds local
+	// wall-clock for older rows and is 8h off. Falling back to the legacy column
+	// mirrors Mastra's own `createdAtZ || createdAt` read path.
 	query := `
 		SELECT
 			m.id,
@@ -274,7 +279,7 @@ func (s *agentStore) ListMessages(ctx context.Context, threadID, userID, cursor 
 			m.role,
 			m.type,
 			f.feedback_type,
-			m."createdAt"
+			COALESCE(m."createdAtZ", m."createdAt") AS "createdAt"
 		FROM mastra_messages m
 		LEFT JOIN response_feedback f ON f.message_id = m.id AND f.user_id = $1 AND f.thread_id = $2
 		WHERE m.thread_id = $2
@@ -285,14 +290,16 @@ func (s *agentStore) ListMessages(ctx context.Context, threadID, userID, cursor 
 
 	if cursor != "" {
 		query += fmt.Sprintf(`
-		AND m."createdAt" < (SELECT "createdAt" FROM mastra_messages WHERE id = $%d)
+		AND COALESCE(m."createdAtZ", m."createdAt") < (
+			SELECT COALESCE("createdAtZ", "createdAt") FROM mastra_messages WHERE id = $%d
+		)
 		`, argIdx)
 		args = append(args, cursor)
 		argIdx++
 	}
 
 	query += fmt.Sprintf(`
-		ORDER BY m."createdAt" DESC
+		ORDER BY COALESCE(m."createdAtZ", m."createdAt") DESC
 		LIMIT $%d
 	`, argIdx)
 	args = append(args, count+1)
