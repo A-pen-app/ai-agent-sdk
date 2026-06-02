@@ -17,6 +17,9 @@ import (
 )
 
 type agentService struct {
+	// Share operations are implemented by an embedded shareService so the
+	// Agent interface (which embeds Share) is satisfied through promotion.
+	*shareService
 	s              store.Agent
 	agentStreamURL string
 	httpClient     *http.Client
@@ -27,13 +30,15 @@ type agentService struct {
 
 // NewAgent creates a new Agent service.
 func NewAgent(s store.Agent, agentStreamURL string) Agent {
+	httpClient := &http.Client{
+		Timeout: 5 * time.Minute,
+	}
 	return &agentService{
+		shareService:   &shareService{s: s, agentStreamURL: agentStreamURL, httpClient: httpClient},
 		s:              s,
 		agentStreamURL: agentStreamURL,
-		httpClient: &http.Client{
-			Timeout: 5 * time.Minute,
-		},
-		activeStreams: make(map[string]context.CancelFunc),
+		httpClient:     httpClient,
+		activeStreams:  make(map[string]context.CancelFunc),
 	}
 }
 
@@ -667,4 +672,20 @@ func (svc *agentService) cancelLocalStream(threadID string) bool {
 	cancel()
 	delete(svc.activeStreams, threadID)
 	return true
+}
+
+// extractTextContent parses V2 content format and extracts plain text.
+// If the content is not V2 format, it returns the raw content as-is.
+func extractTextContent(content string) string {
+	var v2 models.MastraContentV2
+	if err := json.Unmarshal([]byte(content), &v2); err != nil || v2.Format == 0 {
+		return content
+	}
+	var parts []string
+	for _, part := range v2.Parts {
+		if part.Type == "text" && part.Text != "" {
+			parts = append(parts, part.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }

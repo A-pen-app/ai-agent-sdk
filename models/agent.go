@@ -6,12 +6,13 @@ import "time"
 
 // MastraThread maps to the mastra_threads table (camelCase columns).
 type MastraThread struct {
-	ID         string    `db:"id" json:"id"`
-	ResourceID string    `db:"resourceId" json:"resourceId"`
-	Title      string    `db:"title" json:"title"`
-	Metadata   *string   `db:"metadata" json:"metadata,omitempty"`
-	CreatedAt  time.Time `db:"createdAt" json:"createdAt"`
-	UpdatedAt  time.Time `db:"updatedAt" json:"updatedAt"`
+	ID         string     `db:"id" json:"id"`
+	ResourceID string     `db:"resourceId" json:"resourceId"`
+	Title      string     `db:"title" json:"title"`
+	Metadata   *string    `db:"metadata" json:"metadata,omitempty"`
+	CreatedAt  time.Time  `db:"createdAt" json:"createdAt"`
+	UpdatedAt  time.Time  `db:"updatedAt" json:"updatedAt"`
+	DeletedAt  *time.Time `db:"deletedAt" json:"deletedAt,omitempty"`
 }
 
 // MastraMessage maps to the mastra_messages table (camelCase columns).
@@ -40,6 +41,24 @@ type ResponseFeedback struct {
 	FeedbackType *string    `db:"feedback_type" json:"feedback_type,omitempty"`
 	CreatedAt    *time.Time `db:"created_at" json:"created_at,omitempty"`
 	UpdatedAt    *time.Time `db:"updated_at" json:"updated_at,omitempty"`
+}
+
+// ShareLink maps to the share_links table.
+type ShareLinkType string
+
+const (
+	ShareLinkTypeAIThread ShareLinkType = "ai_thread"
+)
+
+type ShareLink struct {
+	ID          string        `db:"id" json:"id"`
+	Type        ShareLinkType `db:"type" json:"type"`
+	ReferenceID string        `db:"reference_id" json:"reference_id"`
+	UserID      string        `db:"user_id" json:"-"`
+	ShortCode   *string       `db:"short_code" json:"-"`
+	CreatedAt   time.Time     `db:"created_at" json:"created_at"`
+	DeletedAt   *time.Time    `db:"deleted_at" json:"-"`
+	UpdatedAt   time.Time     `db:"updated_at" json:"-"`
 }
 
 // --- Joined query structs ---
@@ -128,6 +147,40 @@ type MessageListResponse struct {
 // SuccessResponse is a generic success response.
 type SuccessResponse struct {
 	Success bool `json:"success"`
+}
+
+// SharedMessageResponse is a single message in the shared messages response.
+type SharedMessageResponse struct {
+	ID        string    `json:"id"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// SharedMessageListResponse is the paginated shared message list response.
+type SharedMessageListResponse struct {
+	Data    []SharedMessageResponse `json:"data"`
+	HasMore bool                    `json:"has_more"`
+	Next    *string                 `json:"next"`
+}
+
+// CreateShareLinkResponse is the response for creating a share link.
+type CreateShareLinkResponse struct {
+	ID       string `json:"id"`
+	ShareURL string `json:"share_url"`
+}
+
+// GetShareLinkResponse is the response for getting share link info.
+type GetShareLinkResponse struct {
+	ID          string `json:"id"`
+	ThreadTitle string `json:"thread_title"`
+	CreatedAt   int64  `json:"created_at"`
+}
+
+// ForkThreadResponse is the response for fork thread API.
+type ForkThreadResponse struct {
+	ThreadID string `json:"thread_id"`
+	Title    string `json:"title"`
 }
 
 // --- API request structs ---
