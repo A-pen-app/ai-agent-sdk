@@ -158,10 +158,11 @@ type SharedMessageResponse struct {
 }
 
 // SharedMessageListResponse is the paginated shared message list response.
+// Pagination is signalled by Next: a non-nil value means there are more pages,
+// matching ThreadListResponse / MessageListResponse.
 type SharedMessageListResponse struct {
-	Data    []SharedMessageResponse `json:"data"`
-	HasMore bool                    `json:"has_more"`
-	Next    *string                 `json:"next"`
+	Data []SharedMessageResponse `json:"data"`
+	Next *string                 `json:"next"`
 }
 
 // CreateShareLinkResponse is the response for creating a share link.
@@ -174,7 +175,6 @@ type CreateShareLinkResponse struct {
 type GetShareLinkResponse struct {
 	ID          string `json:"id"`
 	ThreadTitle string `json:"thread_title"`
-	CreatedAt   int64  `json:"created_at"`
 }
 
 // ForkThreadResponse is the response for fork thread API.

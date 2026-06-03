@@ -114,9 +114,8 @@ func (svc *shareService) ListSharedMessages(ctx context.Context, id, cursor stri
 	}
 
 	return &models.SharedMessageListResponse{
-		Data:    data,
-		HasMore: hasMore,
-		Next:    next,
+		Data: data,
+		Next: next,
 	}, nil
 }
 
