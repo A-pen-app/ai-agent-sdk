@@ -322,6 +322,7 @@ func (s *agentStore) UpsertFeedback(ctx context.Context, userID, messageID, feed
 		SELECT $1, m.thread_id, $2, $3, NOW(), NOW()
 		FROM mastra_messages m
 		WHERE m.id = $2
+		AND m.role = 'assistant'
 		ON CONFLICT (message_id, thread_id, user_id)
 		DO UPDATE SET feedback_type = $3, updated_at = NOW()
 	`
@@ -345,7 +346,9 @@ func (s *agentStore) UpsertFeedback(ctx context.Context, userID, messageID, feed
 	}
 
 	if rowsAffected == 0 {
-		logging.Errorw(ctx, "Message not found for feedback upsert",
+		// Message missing OR not an assistant message — both surface as 404 so we
+		// don't leak which one it was.
+		logging.Errorw(ctx, "Message not found (or not assistant) for feedback upsert",
 			"user_id", userID,
 			"message_id", messageID,
 			"feedback", feedback,

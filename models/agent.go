@@ -1,6 +1,12 @@
 package models
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+	"unicode/utf8"
+)
 
 // --- DB row structs ---
 
@@ -191,9 +197,42 @@ type CreateThreadRequest struct {
 }
 
 // UpdateThreadRequest is the request body for updating a thread (title and/or pin status).
+// PATCH semantics (enforced by Validate):
+//   - field absent: no update
+//   - field present as null: validation error (fields do not accept null)
+//   - title: trimmed, must be non-empty, at most MaxThreadTitleLen runes
 type UpdateThreadRequest struct {
-	Title    *string `json:"title,omitempty"`
-	IsPinned *bool   `json:"is_pinned,omitempty"`
+	Title    Optional[string] `json:"title,omitempty" swaggertype:"string" example:"台北內科諮詢"`
+	IsPinned Optional[bool]   `json:"is_pinned,omitempty" swaggertype:"boolean" example:"true"`
+}
+
+// MaxThreadTitleLen is the maximum thread title length in runes.
+const MaxThreadTitleLen = 200
+
+// ErrValidation marks a PATCH-body validation failure. API layers can map it to
+// their own error envelope (e.g. 400 VALIDATION_ERROR) via errors.Is.
+var ErrValidation = errors.New("validation error")
+
+// Validate enforces the PATCH semantics above. On success the title value is
+// normalized in place (trimmed).
+func (r *UpdateThreadRequest) Validate() error {
+	if r.Title.Present {
+		if r.Title.Value == nil {
+			return fmt.Errorf("%w: title must not be null", ErrValidation)
+		}
+		t := strings.TrimSpace(*r.Title.Value)
+		if t == "" {
+			return fmt.Errorf("%w: title must not be empty", ErrValidation)
+		}
+		if utf8.RuneCountInString(t) > MaxThreadTitleLen {
+			return fmt.Errorf("%w: title exceeds %d characters", ErrValidation, MaxThreadTitleLen)
+		}
+		r.Title.Value = &t
+	}
+	if r.IsPinned.Present && r.IsPinned.Value == nil {
+		return fmt.Errorf("%w: is_pinned must not be null", ErrValidation)
+	}
+	return nil
 }
 
 // StreamRequest is the request body for the stream endpoint.
@@ -235,8 +274,10 @@ type StreamErrorData struct {
 }
 
 // FeedbackRequest is the request body for submitting feedback.
+// "none" is a read-only state (default when no feedback given) and cannot be
+// submitted: like → unlike is allowed (overwrites), reverting to none is not.
 type FeedbackRequest struct {
-	Feedback string `json:"feedback" binding:"required,oneof=like unlike none"`
+	Feedback string `json:"feedback" binding:"required,oneof=like unlike"`
 }
 
 // --- V2 content parsing structs (internal) ---

@@ -23,9 +23,16 @@ type agentService struct {
 	s              store.Agent
 	agentStreamURL string
 	httpClient     *http.Client
-	// Stream management
-	activeStreams map[string]context.CancelFunc // threadID -> cancel function
+	// Stream management: one active stream per thread. The handle's pointer
+	// identity lets the owning goroutine deregister only its own entry (a
+	// newer stream on the same thread may have superseded it).
+	activeStreams map[string]*streamHandle
 	streamMutex   sync.RWMutex
+}
+
+// streamHandle identifies one active stream and carries its cancel function.
+type streamHandle struct {
+	cancel context.CancelFunc
 }
 
 // NewAgent creates a new Agent service.
@@ -38,7 +45,7 @@ func NewAgent(s store.Agent, agentStreamURL string) Agent {
 		s:              s,
 		agentStreamURL: agentStreamURL,
 		httpClient:     httpClient,
-		activeStreams:  make(map[string]context.CancelFunc),
+		activeStreams:  make(map[string]*streamHandle),
 	}
 }
 
@@ -665,11 +672,11 @@ func (svc *agentService) cancelLocalStream(threadID string) bool {
 	svc.streamMutex.Lock()
 	defer svc.streamMutex.Unlock()
 
-	cancel, exists := svc.activeStreams[threadID]
+	h, exists := svc.activeStreams[threadID]
 	if !exists {
 		return false
 	}
-	cancel()
+	h.cancel()
 	delete(svc.activeStreams, threadID)
 	return true
 }

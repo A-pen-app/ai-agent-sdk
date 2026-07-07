@@ -49,15 +49,24 @@ func (svc *agentService) StreamChat(ctx context.Context, userID string, req *mod
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Register this stream so it can be cancelled
+	// Register this stream so it can be cancelled. One active stream per
+	// thread: a new stream supersedes (cancels) any stream still running on
+	// the same thread, so its cancel handle is never silently lost.
+	h := &streamHandle{cancel: cancel}
 	svc.streamMutex.Lock()
-	svc.activeStreams[req.ThreadID] = cancel
+	if old, ok := svc.activeStreams[req.ThreadID]; ok {
+		old.cancel()
+	}
+	svc.activeStreams[req.ThreadID] = h
 	svc.streamMutex.Unlock()
 
-	// Ensure cleanup when stream ends
+	// Ensure cleanup when stream ends — but only deregister our own entry;
+	// a newer stream may have replaced it while we were finishing.
 	defer func() {
 		svc.streamMutex.Lock()
-		delete(svc.activeStreams, req.ThreadID)
+		if svc.activeStreams[req.ThreadID] == h {
+			delete(svc.activeStreams, req.ThreadID)
+		}
 		svc.streamMutex.Unlock()
 	}()
 
