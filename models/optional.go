@@ -20,6 +20,10 @@ type Optional[T any] struct {
 func (o *Optional[T]) UnmarshalJSON(b []byte) error {
 	o.Present = true
 	if bytes.Equal(bytes.TrimSpace(b), []byte("null")) {
+		// Reset explicitly: encoding/json invokes UnmarshalJSON once per
+		// occurrence of a duplicated key (e.g. {"k":"v","k":null}); without the
+		// reset the earlier value survives and the null is silently swallowed.
+		o.Value = nil
 		return nil
 	}
 	return json.Unmarshal(b, &o.Value)
