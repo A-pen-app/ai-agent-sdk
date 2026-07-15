@@ -239,6 +239,10 @@ func (r *UpdateThreadRequest) Validate() error {
 type StreamRequest struct {
 	ThreadID string `json:"thread_id"` // ThreadID now comes from URL path parameter, not required in JSON
 	Query    string `json:"query" binding:"required"`
+	// 使用者座標，選帶、需成對（範圍驗證由接入服務負責）。有帶時會轉發給
+	// AI 服務作地點相關推薦（upstream body 的 location 欄位，pen-gpt 端需支援）。
+	Latitude  *float64 `json:"latitude,omitempty"`
+	Longitude *float64 `json:"longitude,omitempty"`
 }
 
 // --- SSE stream types ---

@@ -117,6 +117,13 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 			"thread":   req.ThreadID,
 		},
 	}
+	// 使用者座標（選帶）：pen-gpt 端以 body.location 讀取，用於地點相關推薦。
+	if req.Latitude != nil && req.Longitude != nil {
+		body["location"] = map[string]float64{
+			"latitude":  *req.Latitude,
+			"longitude": *req.Longitude,
+		}
+	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		sendStreamError(writer, "INTERNAL_ERROR", "failed to build upstream request")
