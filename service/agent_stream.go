@@ -128,6 +128,10 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 			"longitude": *req.Longitude,
 		}
 	}
+	// 預設地區（選帶）：無座標時的地點參考，pen-gpt 端以 body.default_location 讀取。
+	if req.DefaultLocation != "" {
+		body["default_location"] = req.DefaultLocation
+	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		sendStreamError(writer, "INTERNAL_ERROR", "failed to build upstream request")
@@ -300,7 +304,9 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 //   - (false, nil) : upstream returned 200 but had no matching stream
 //   - (false, err) : transport, auth, or non-200 response
 func (svc *agentService) callRemoteStop(ctx context.Context, threadID, userID string) (bool, error) {
-	stopURL := svc.agentStreamURL + "/custom/api/chat/stop"
+	// stop 路徑跟著 streamPath 走：/custom/api/{ns}/stream → /custom/api/{ns}/stop
+	// （chat 與 windoc 皆同此慣例；abort registry 以 ns 隔命名空間，打錯 ns 停不掉）。
+	stopURL := svc.agentStreamURL + strings.TrimSuffix(svc.streamPath, "/stream") + "/stop"
 
 	body, err := json.Marshal(map[string]string{"threadId": threadID})
 	if err != nil {

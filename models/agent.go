@@ -247,6 +247,9 @@ type StreamRequest struct {
 	// AI 服務作地點相關推薦（upstream body 的 location 欄位，pen-gpt 端需支援）。
 	Latitude  *float64 `json:"latitude,omitempty"`
 	Longitude *float64 `json:"longitude,omitempty"`
+	// 預設地區（如「新北市永和區」），選帶。無 GPS 座標時給 AI 服務當
+	// 地點參考（upstream body 的 default_location 欄位）。
+	DefaultLocation string `json:"default_location,omitempty"`
 }
 
 // --- SSE stream types ---
