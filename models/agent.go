@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -142,6 +143,9 @@ type MessageResponse struct {
 	WorkflowSteps []WorkflowStep `json:"workflow_steps,omitempty"`
 	References    []Reference    `json:"references,omitempty"`
 	HasResults    *bool          `json:"has_results,omitempty"`
+	// Recommendations 是推薦工具（如 windocRecommendTool）result.recommendations
+	// 的原樣 JSON。SDK 不解析內容，由接入產品自行 unmarshal 成自己的型別。
+	Recommendations []json.RawMessage `json:"recommendations,omitempty"`
 }
 
 // MessageListResponse is the paginated message list response.
@@ -255,6 +259,8 @@ const (
 	StreamEventWorkflowStep StreamEventType = "workflow_step"
 	StreamEventTextDelta    StreamEventType = "text_delta"
 	StreamEventReferences   StreamEventType = "references"
+	// recommendations：推薦工具結果的原樣 JSON 陣列，流結束前、references 之後送出。
+	StreamEventRecommendations StreamEventType = "recommendations"
 	StreamEventFinish       StreamEventType = "finish"
 	StreamEventDone         StreamEventType = "done"
 	StreamEventError        StreamEventType = "error"

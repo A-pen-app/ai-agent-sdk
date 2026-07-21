@@ -22,6 +22,7 @@ type agentService struct {
 	*shareService
 	s              store.Agent
 	agentStreamURL string
+	streamPath     string // upstream SSE 端點路徑，預設 /custom/api/chat/stream
 	httpClient     *http.Client
 	// Stream management: one active stream per thread. The handle's pointer
 	// identity lets the owning goroutine deregister only its own entry (a
@@ -35,15 +36,22 @@ type streamHandle struct {
 	cancel context.CancelFunc
 }
 
-// NewAgent creates a new Agent service.
-func NewAgent(s store.Agent, agentStreamURL string) Agent {
+// NewAgent creates a new Agent service. streamPath 可選（最多一個），
+// 覆寫 upstream SSE 端點路徑（如 windoc 的 /custom/api/windoc/stream）；
+// 未帶時維持 /custom/api/chat/stream。
+func NewAgent(s store.Agent, agentStreamURL string, streamPath ...string) Agent {
 	httpClient := &http.Client{
 		Timeout: 5 * time.Minute,
+	}
+	sp := "/custom/api/chat/stream"
+	if len(streamPath) > 0 && streamPath[0] != "" {
+		sp = streamPath[0]
 	}
 	return &agentService{
 		shareService:   &shareService{s: s, agentStreamURL: agentStreamURL, httpClient: httpClient},
 		s:              s,
 		agentStreamURL: agentStreamURL,
+		streamPath:     sp,
 		httpClient:     httpClient,
 		activeStreams:  make(map[string]*streamHandle),
 	}
@@ -200,6 +208,7 @@ func parseMessage(row models.MessageWithFeedback) models.MessageResponse {
 	var textParts []string
 	var steps []models.WorkflowStep
 	var refs []models.Reference
+	var recs []json.RawMessage
 	var hasResults *bool
 
 	for _, part := range v2.Parts {
@@ -230,6 +239,7 @@ func parseMessage(row models.MessageWithFeedback) models.MessageResponse {
 					})
 				}
 				refs = append(refs, extractReferences(ti.Result)...)
+				recs = append(recs, extractRecommendations(ti.Result)...)
 				if hasResults == nil {
 					hasResults = extractHasResults(ti.Result)
 				}
@@ -243,6 +253,9 @@ func parseMessage(row models.MessageWithFeedback) models.MessageResponse {
 	}
 	if len(refs) > 0 {
 		msg.References = refs
+	}
+	if len(recs) > 0 {
+		msg.Recommendations = recs
 	}
 	if hasResults != nil {
 		msg.HasResults = hasResults
@@ -302,6 +315,26 @@ func translateToolName(toolName string, args interface{}) string {
 	}
 	
 	switch toolName {
+	case "facilityDoctorSearchTool":
+		// windoc：搜尋醫師/院所。組地點＋科別，如「搜尋新北市永和區牙科醫師資訊...」
+		var loc, specialty string
+		if args != nil {
+			if argsData, err := json.Marshal(args); err == nil {
+				var m map[string]interface{}
+				if json.Unmarshal(argsData, &m) == nil {
+					county, _ := m["county"].(string)
+					district, _ := m["district"].(string)
+					specialty, _ = m["specialty"].(string)
+					loc = county + district
+				}
+			}
+		}
+		if loc != "" || specialty != "" {
+			return fmt.Sprintf("搜尋%s%s醫師資訊...", loc, specialty)
+		}
+		return "搜尋醫師與院所資訊..."
+	case "windocRecommendTool":
+		return "整理推薦的醫師與院所..."
 	case "agent-financeSubAgent":
 		if query != "" {
 			return fmt.Sprintf("查詢關於%s的理財市場趨勢與資產配置相關資訊", query)
@@ -455,6 +488,34 @@ func extractWorkflowSteps(args, result interface{}) []models.WorkflowStep {
 //
 // Each reference object may contain: type, id, title, url, post_id,
 // product_name_zh, product_name_en.
+// extractRecommendations pulls the raw recommendations array out of a tool
+// result（windocRecommendTool 的 {"recommendations":[...]}；也容忍多包一層
+// result 的 {"result":{"recommendations":[...]}}）。內容原樣回傳不解析。
+func extractRecommendations(result interface{}) []json.RawMessage {
+	if result == nil {
+		return nil
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return nil
+	}
+	var direct struct {
+		Recommendations []json.RawMessage `json:"recommendations"`
+	}
+	if json.Unmarshal(data, &direct) == nil && len(direct.Recommendations) > 0 {
+		return direct.Recommendations
+	}
+	var nested struct {
+		Result struct {
+			Recommendations []json.RawMessage `json:"recommendations"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(data, &nested) == nil {
+		return nested.Result.Recommendations
+	}
+	return nil
+}
+
 func extractReferences(result interface{}) []models.Reference {
 	if result == nil {
 		return nil

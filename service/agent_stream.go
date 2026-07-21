@@ -75,13 +75,16 @@ func (svc *agentService) StreamChat(ctx context.Context, userID string, req *mod
 		return err
 	}
 
-	// Execute the upstream stream; collect references and any error.
-	refs, streamErr := svc.doUpstreamStream(streamCtx, userID, req, writer)
+	// Execute the upstream stream; collect references/recommendations and any error.
+	refs, recs, streamErr := svc.doUpstreamStream(streamCtx, userID, req, writer)
 
-	// Always send accumulated references, finish, and done — even on error —
-	// so the client can properly clean up its streaming state.
+	// Always send accumulated references, recommendations, finish, and done —
+	// even on error — so the client can properly clean up its streaming state.
 	if len(refs) > 0 {
 		_ = writer(&models.StreamEnvelope{Event: models.StreamEventReferences, Data: refs})
+	}
+	if len(recs) > 0 {
+		_ = writer(&models.StreamEnvelope{Event: models.StreamEventRecommendations, Data: recs})
 	}
 
 	// Send finish with the full message list from DB.
@@ -100,16 +103,17 @@ func (svc *agentService) StreamChat(ctx context.Context, userID string, req *mod
 }
 
 // doUpstreamStream handles the actual upstream request and stream parsing.
-// It returns collected references and any error encountered.
-func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, req *models.StreamRequest, writer StreamWriter) ([]models.Reference, error) {
+// It returns collected references, raw recommendations, and any error encountered.
+func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, req *models.StreamRequest, writer StreamWriter) ([]models.Reference, []json.RawMessage, error) {
 	// Build upstream request to pen-gpt Mastra agent.
 	//
-	// We hit the custom /custom/api/chat/stream endpoint (not Mastra's
-	// built-in /api/agents/:agentId/stream) so that PauseStream can abort
+	// We hit the custom stream endpoint（預設 /custom/api/chat/stream，可由
+	// NewAgent 的 streamPath 覆寫，not Mastra's built-in
+	// /api/agents/:agentId/stream) so that PauseStream can abort
 	// the running agent.stream() out-of-band via /custom/api/chat/stop.
 	// The custom endpoint forwards the same SSE-wrapped JSON chunk format
 	// as the built-in route, so the parser below is unchanged.
-	mastraURL := svc.agentStreamURL + "/custom/api/chat/stream"
+	mastraURL := svc.agentStreamURL + svc.streamPath
 	body := map[string]interface{}{
 		"messages": []map[string]string{{"role": "user", "content": req.Query}},
 		"memory": map[string]interface{}{
@@ -127,13 +131,13 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		sendStreamError(writer, "INTERNAL_ERROR", "failed to build upstream request")
-		return nil, err
+		return nil, nil, err
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, mastraURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		sendStreamError(writer, "INTERNAL_ERROR", "failed to create upstream request")
-		return nil, err
+		return nil, nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-user-id", userID)
@@ -149,13 +153,13 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 	resp, err := svc.httpClient.Do(httpReq)
 	if err != nil {
 		sendStreamError(writer, "UPSTREAM_ERROR", "AI 服務暫時無法使用，請稍後再試")
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		sendStreamError(writer, "UPSTREAM_ERROR", fmt.Sprintf("AI 服務回傳錯誤 (status %d)", resp.StatusCode))
-		return nil, fmt.Errorf("upstream returned status %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("upstream returned status %d", resp.StatusCode)
 	}
 
 	// Parse the upstream SSE stream line by line.
@@ -163,6 +167,7 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 	// is nested inside a "payload" object:
 	//   data: {"type":"text-delta","runId":"...","from":"AGENT","payload":{"text":"..."}}
 	var refs []models.Reference
+	var recs []json.RawMessage
 	var inThought bool
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -226,6 +231,7 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 			}
 			extracted := extractReferences(chunk.Payload.Result)
 			refs = append(refs, extracted...)
+			recs = append(recs, extractRecommendations(chunk.Payload.Result)...)
 
 		case "tool-output":
 			// tool-output contains nested workflow events in payload.output.
@@ -281,7 +287,7 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 		logging.Error(ctx, "stream scanner error: %v", err)
 	}
 
-	return refs, nil
+	return refs, recs, nil
 }
 
 // callRemoteStop calls Mastra's /custom/api/chat/stop endpoint to abort an
