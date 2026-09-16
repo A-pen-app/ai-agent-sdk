@@ -135,9 +135,11 @@ type WorkflowResult struct {
 
 // MessageResponse is a single message in the API response.
 type MessageResponse struct {
-	ID            string         `json:"id"`
-	Role          string         `json:"role"`
-	Content       string         `json:"content"`
+	ID      string `json:"id"`
+	Role    string `json:"role"`
+	Content string `json:"content"`
+	// ImageURLs 是這則訊息附的圖片網址（使用者訊息才有），供前端在對話泡泡裡顯示。
+	ImageURLs     []string       `json:"image_urls,omitempty"`
 	Feedback      *string        `json:"feedback,omitempty"`
 	WorkflowSteps []WorkflowStep `json:"workflow_steps,omitempty"`
 	References    []Reference    `json:"references,omitempty"`
@@ -310,6 +312,10 @@ type MastraV2Part struct {
 	Type           string          `json:"type"`
 	Text           string          `json:"text,omitempty"`
 	ToolInvocation *ToolInvocation `json:"toolInvocation,omitempty"`
+	// type=="file" 的欄位。Mastra 存的是 data（網址）+ mimeType，
+	// 不是 AI SDK 請求端用的 url/mediaType——名字不同，別對調。
+	Data     string `json:"data,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
 }
 
 // ToolInvocation represents a tool call/result nested inside a V2 part.
