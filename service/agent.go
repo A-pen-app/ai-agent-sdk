@@ -536,6 +536,15 @@ func extractReferences(result interface{}) []models.Reference {
 		return deduplicateRefs(newFormat.Result.FinalReferences)
 	}
 
+	// final_references 直接在 tool result 頂層（同 windocRecommendTool 的
+	// recommendations 擺法），不多包 result。
+	var direct struct {
+		FinalReferences []refJSON `json:"final_references"`
+	}
+	if err := json.Unmarshal(data, &direct); err == nil && len(direct.FinalReferences) > 0 {
+		return deduplicateRefs(direct.FinalReferences)
+	}
+
 	// Fallback to old format with steps
 	var outer struct {
 		Result struct {
