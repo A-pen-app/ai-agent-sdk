@@ -110,14 +110,14 @@ type WorkflowStep struct {
 
 // Reference represents a source reference from tool results.
 type Reference struct {
-	Type          string      `json:"type" example:"post"`                                                                    // Type of reference (e.g., "post")
-	ID            string      `json:"id" example:"123e4567-e89b-12d3-a456-426614174000"`                                       // Unique identifier of the referenced item
-	Title         string      `json:"title,omitempty" example:"Example Post Title"`                                           // Title of the referenced item
-	Content       string      `json:"content,omitempty" example:"This is the content of the referenced post..."`             // Content or excerpt of the referenced item
-	URL           string      `json:"url,omitempty" example:"apen://posts/123e4567-e89b-12d3-a456-426614174000"`            // URL to access the referenced item
-	ProductNameZH string      `json:"product_name_zh,omitempty" example:"产品名称"`                                           // Product name in Chinese (if applicable)
-	ProductNameEN string      `json:"product_name_en,omitempty" example:"Product Name"`                                     // Product name in English (if applicable)
-	Post          interface{} `json:"post,omitempty" swaggertype:"object"`  // Complete post data when reference type is "post"
+	Type          string      `json:"type" example:"post"`                                                       // Type of reference (e.g., "post")
+	ID            string      `json:"id" example:"123e4567-e89b-12d3-a456-426614174000"`                         // Unique identifier of the referenced item
+	Title         string      `json:"title,omitempty" example:"Example Post Title"`                              // Title of the referenced item
+	Content       string      `json:"content,omitempty" example:"This is the content of the referenced post..."` // Content or excerpt of the referenced item
+	URL           string      `json:"url,omitempty" example:"apen://posts/123e4567-e89b-12d3-a456-426614174000"` // URL to access the referenced item
+	ProductNameZH string      `json:"product_name_zh,omitempty" example:"产品名称"`                                  // Product name in Chinese (if applicable)
+	ProductNameEN string      `json:"product_name_en,omitempty" example:"Product Name"`                          // Product name in English (if applicable)
+	Post          interface{} `json:"post,omitempty" swaggertype:"object"`                                       // Complete post data when reference type is "post"
 }
 
 // ToolResult represents the result structure in new format tool invocations
@@ -133,12 +133,13 @@ type WorkflowResult struct {
 	HasResults      bool        `json:"hasResults,omitempty"`
 }
 
-
 // MessageResponse is a single message in the API response.
 type MessageResponse struct {
-	ID            string         `json:"id"`
-	Role          string         `json:"role"`
-	Content       string         `json:"content"`
+	ID      string `json:"id"`
+	Role    string `json:"role"`
+	Content string `json:"content"`
+	// ImageURLs 是這則訊息附的圖片網址（使用者訊息才有），供前端在對話泡泡裡顯示。
+	ImageURLs     []string       `json:"image_urls,omitempty"`
 	Feedback      *string        `json:"feedback,omitempty"`
 	WorkflowSteps []WorkflowStep `json:"workflow_steps,omitempty"`
 	References    []Reference    `json:"references,omitempty"`
@@ -250,6 +251,10 @@ type StreamRequest struct {
 	// 預設地區（如「新北市永和區」），選帶。無 GPS 座標時給 AI 服務當
 	// 地點參考（upstream body 的 default_location 欄位）。
 	DefaultLocation string `json:"default_location,omitempty"`
+	// 隨訊息一起看的圖片網址，選帶。有帶時 upstream 的 user message content
+	// 從字串換成 parts 陣列（text + file）。網址必須公開可讀——AI 服務端的
+	// model provider 會自己去抓；來源合法性由接入服務把關（只收自家上傳的網址）。
+	ImageURLs []string `json:"image_urls,omitempty"`
 }
 
 // --- SSE stream types ---
@@ -264,9 +269,9 @@ const (
 	StreamEventReferences   StreamEventType = "references"
 	// recommendations：推薦工具結果的原樣 JSON 陣列，流結束前、references 之後送出。
 	StreamEventRecommendations StreamEventType = "recommendations"
-	StreamEventFinish       StreamEventType = "finish"
-	StreamEventDone         StreamEventType = "done"
-	StreamEventError        StreamEventType = "error"
+	StreamEventFinish          StreamEventType = "finish"
+	StreamEventDone            StreamEventType = "done"
+	StreamEventError           StreamEventType = "error"
 )
 
 // StreamEnvelope is the JSON structure sent as SSE data.
@@ -307,6 +312,10 @@ type MastraV2Part struct {
 	Type           string          `json:"type"`
 	Text           string          `json:"text,omitempty"`
 	ToolInvocation *ToolInvocation `json:"toolInvocation,omitempty"`
+	// type=="file" 的欄位。Mastra 存的是 data（網址）+ mimeType，
+	// 不是 AI SDK 請求端用的 url/mediaType——名字不同，別對調。
+	Data     string `json:"data,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
 }
 
 // ToolInvocation represents a tool call/result nested inside a V2 part.

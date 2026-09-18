@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	e "github.com/A-pen-app/errors"
-	"github.com/A-pen-app/logging"
 	"github.com/A-pen-app/ai-agent-sdk/models"
 	"github.com/A-pen-app/ai-agent-sdk/store"
+	e "github.com/A-pen-app/errors"
+	"github.com/A-pen-app/logging"
 	"github.com/google/uuid"
 )
 
@@ -206,6 +206,7 @@ func parseMessage(row models.MessageWithFeedback) models.MessageResponse {
 	}
 
 	var textParts []string
+	var imageURLs []string
 	var steps []models.WorkflowStep
 	var refs []models.Reference
 	var recs []json.RawMessage
@@ -216,6 +217,11 @@ func parseMessage(row models.MessageWithFeedback) models.MessageResponse {
 		case "text":
 			if part.Text != "" {
 				textParts = append(textParts, part.Text)
+			}
+		case "file":
+			// 目前只有圖片能上傳，所以不濾 mimeType；哪天收 PDF 再分流。
+			if part.Data != "" {
+				imageURLs = append(imageURLs, part.Data)
 			}
 		case "tool-invocation":
 			if part.ToolInvocation == nil {
@@ -248,6 +254,9 @@ func parseMessage(row models.MessageWithFeedback) models.MessageResponse {
 	}
 
 	msg.Content = strings.Join(textParts, "\n")
+	if len(imageURLs) > 0 {
+		msg.ImageURLs = imageURLs
+	}
 	if len(steps) > 0 {
 		msg.WorkflowSteps = steps
 	}
@@ -313,7 +322,7 @@ func translateToolName(toolName string, args interface{}) string {
 			}
 		}
 	}
-	
+
 	switch toolName {
 	case "facilityDoctorSearchTool":
 		// windoc：搜尋醫師/院所。組地點＋科別，如「搜尋新北市永和區牙科醫師資訊...」
@@ -391,7 +400,7 @@ func extractWorkflowSteps(args, result interface{}) []models.WorkflowStep {
 	// Determine which format to use (new format has nested inputData)
 	var query string
 	var execFlags map[string]bool
-	
+
 	if wfArgs.InputData.Query != "" {
 		// New format with inputData
 		query = wfArgs.InputData.Query
@@ -421,16 +430,16 @@ func extractWorkflowSteps(args, result interface{}) []models.WorkflowStep {
 	// Try to get steps from new format first
 	var resultSteps map[string]json.RawMessage
 	var hasNewFormat bool
-	
+
 	if result != nil {
 		resultData, err := json.Marshal(result)
 		if err == nil {
 			// Try new format - direct result.result structure
 			var newFormat struct {
 				Result struct {
-					Summary         string `json:"summary"`
+					Summary         string            `json:"summary"`
 					FinalReferences []json.RawMessage `json:"final_references"`
-					HasResults      bool `json:"hasResults"`
+					HasResults      bool              `json:"hasResults"`
 				} `json:"result"`
 			}
 			if json.Unmarshal(resultData, &newFormat) == nil && newFormat.Result.HasResults {
@@ -468,7 +477,7 @@ func extractWorkflowSteps(args, result interface{}) []models.WorkflowStep {
 				continue
 			}
 		}
-		
+
 		displayName := translateStepName(def.StepName, query)
 		if displayName == "" {
 			continue
@@ -534,6 +543,15 @@ func extractReferences(result interface{}) []models.Reference {
 	}
 	if err := json.Unmarshal(data, &newFormat); err == nil && len(newFormat.Result.FinalReferences) > 0 {
 		return deduplicateRefs(newFormat.Result.FinalReferences)
+	}
+
+	// final_references 直接在 tool result 頂層（同 windocRecommendTool 的
+	// recommendations 擺法），不多包 result。
+	var direct struct {
+		FinalReferences []refJSON `json:"final_references"`
+	}
+	if err := json.Unmarshal(data, &direct); err == nil && len(direct.FinalReferences) > 0 {
+		return deduplicateRefs(direct.FinalReferences)
 	}
 
 	// Fallback to old format with steps

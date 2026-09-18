@@ -102,6 +102,23 @@ func (svc *agentService) StreamChat(ctx context.Context, userID string, req *mod
 	return streamErr
 }
 
+// userContent 組出使用者訊息的 content：純文字時是字串（維持原本的 body 形狀），
+// 有帶圖時改成 AI SDK 的 message parts 陣列，pen-gpt 端原樣轉給 agent.stream()。
+//
+// mediaType 固定 image/jpeg —— 接入服務（windoc-api）上傳時一律重新編碼成 JPEG；
+// ponytail: 哪天允許原檔上傳，就把 media type 一起從 ImageURLs 帶過來。
+func userContent(req *models.StreamRequest) any {
+	if len(req.ImageURLs) == 0 {
+		return req.Query
+	}
+	parts := make([]map[string]any, 0, len(req.ImageURLs)+1)
+	parts = append(parts, map[string]any{"type": "text", "text": req.Query})
+	for _, u := range req.ImageURLs {
+		parts = append(parts, map[string]any{"type": "file", "data": u, "mediaType": "image/jpeg"})
+	}
+	return parts
+}
+
 // doUpstreamStream handles the actual upstream request and stream parsing.
 // It returns collected references, raw recommendations, and any error encountered.
 func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, req *models.StreamRequest, writer StreamWriter) ([]models.Reference, []json.RawMessage, error) {
@@ -115,7 +132,7 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 	// as the built-in route, so the parser below is unchanged.
 	mastraURL := svc.agentStreamURL + svc.streamPath
 	body := map[string]interface{}{
-		"messages": []map[string]string{{"role": "user", "content": req.Query}},
+		"messages": []map[string]any{{"role": "user", "content": userContent(req)}},
 		"memory": map[string]interface{}{
 			"resource": userID,
 			"thread":   req.ThreadID,
