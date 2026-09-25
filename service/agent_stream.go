@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -31,7 +33,16 @@ type mastraChunkPayload struct {
 	Result     interface{} `json:"result,omitempty"`
 	// tool-output (workflow events nested inside output)
 	Output json.RawMessage `json:"output,omitempty"`
+	// error：只寫進 server log，不轉給 client
+	Error json.RawMessage `json:"error,omitempty"`
 }
+
+// ErrUpstream 表示上游失敗，且 client 已收到 UPSTREAM_ERROR event；
+// 呼叫端用 errors.Is 判斷，不要再補送一次 error event。
+var ErrUpstream = errors.New("upstream stream failed")
+
+// upstreamLogLimit 限制寫進 log 的上游錯誤內容長度。
+const upstreamLogLimit = 2048
 
 // mastraWorkflowEvent represents a workflow event nested inside tool-output payload.output.
 type mastraWorkflowEvent struct {
@@ -42,6 +53,7 @@ type mastraWorkflowEvent struct {
 // StreamChat proxies a chat request to the upstream Mastra agent, parses the
 // Mastra SSE fullStream protocol, and converts events into the simplified
 // BFF SSE format defined in api-proposal.md.
+// 上游失敗時回傳 wrap 過的 ErrUpstream，client 已收到 error event。
 func (svc *agentService) StreamChat(ctx context.Context, userID string, req *models.StreamRequest, writer StreamWriter) error {
 	// Create a cancellable context for this stream
 	streamCtx, cancel := context.WithCancel(ctx)
@@ -161,24 +173,24 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-user-id", userID)
 
-	// Attach Google ID token for Cloud Run authentication.
-	// Skip gracefully when running locally with authorized_user credentials.
-	if ts, err := idtoken.NewTokenSource(ctx, svc.agentStreamURL); err == nil {
-		if token, err := ts.Token(); err == nil {
-			httpReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
-		}
-	}
+	svc.setIDToken(ctx, httpReq)
 
 	resp, err := svc.httpClient.Do(httpReq)
 	if err != nil {
+		logging.Errorw(ctx, "upstream stream request failed", "error", err.Error(), "thread_id", req.ThreadID)
 		sendStreamError(writer, "UPSTREAM_ERROR", "AI 服務暫時無法使用，請稍後再試")
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("%w: %v", ErrUpstream, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		sendStreamError(writer, "UPSTREAM_ERROR", fmt.Sprintf("AI 服務回傳錯誤 (status %d)", resp.StatusCode))
-		return nil, nil, fmt.Errorf("upstream returned status %d", resp.StatusCode)
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamLogLimit))
+		logging.Errorw(ctx, "upstream stream returned non-OK status",
+			"status_code", resp.StatusCode,
+			"body", string(detail),
+			"thread_id", req.ThreadID)
+		sendStreamError(writer, "UPSTREAM_ERROR", "AI 服務發生錯誤")
+		return nil, nil, fmt.Errorf("%w: status %d", ErrUpstream, resp.StatusCode)
 	}
 
 	// Parse the upstream SSE stream line by line.
@@ -284,8 +296,12 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 			}
 
 		case "error":
-			// 上游錯誤原文不轉給 client；細節由 pen-gpt 記在自己的 server log。
+			// 第一個 error chunk 就結束這回合，之後的 chunk 不再轉給 client。
+			logging.Errorw(ctx, "upstream stream error chunk",
+				"error", truncate(string(chunk.Payload.Error), upstreamLogLimit),
+				"thread_id", req.ThreadID)
 			sendStreamError(writer, "UPSTREAM_ERROR", "AI 服務發生錯誤")
+			return refs, recs, fmt.Errorf("%w: error chunk", ErrUpstream)
 
 			// Types we intentionally skip:
 			// "start"                           — stream start metadata
@@ -332,12 +348,7 @@ func (svc *agentService) callRemoteStop(ctx context.Context, threadID, userID st
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-user-id", userID)
 
-	// Same Cloud Run ID token flow as doUpstreamStream.
-	if ts, err := idtoken.NewTokenSource(ctx, svc.agentStreamURL); err == nil {
-		if token, err := ts.Token(); err == nil {
-			req.Header.Set("Authorization", "Bearer "+token.AccessToken)
-		}
-	}
+	svc.setIDToken(ctx, req)
 
 	resp, err := svc.httpClient.Do(req)
 	if err != nil {
@@ -386,6 +397,33 @@ func filterThought(text string, inThought bool) (string, bool) {
 	}
 
 	return result.String(), inThought
+}
+
+// setIDToken attaches a Google ID token for Cloud Run authentication.
+// Skip gracefully when running locally with authorized_user credentials.
+func (svc *agentService) setIDToken(ctx context.Context, req *http.Request) {
+	if token, err := svc.idToken(ctx, svc.agentStreamURL); err == nil {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+func cloudRunIDToken(ctx context.Context, audience string) (string, error) {
+	ts, err := idtoken.NewTokenSource(ctx, audience)
+	if err != nil {
+		return "", err
+	}
+	token, err := ts.Token()
+	if err != nil {
+		return "", err
+	}
+	return token.AccessToken, nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // sendStreamError sends an error event to the client.
