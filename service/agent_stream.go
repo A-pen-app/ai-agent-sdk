@@ -31,8 +31,6 @@ type mastraChunkPayload struct {
 	Result     interface{} `json:"result,omitempty"`
 	// tool-output (workflow events nested inside output)
 	Output json.RawMessage `json:"output,omitempty"`
-	// error
-	Error interface{} `json:"error,omitempty"`
 }
 
 // mastraWorkflowEvent represents a workflow event nested inside tool-output payload.output.
@@ -286,11 +284,8 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 			}
 
 		case "error":
-			msg := "AI 服務發生錯誤"
-			if s, ok := chunk.Payload.Error.(string); ok && s != "" {
-				msg = s
-			}
-			sendStreamError(writer, "UPSTREAM_ERROR", msg)
+			// 上游錯誤原文不轉給 client；細節由 pen-gpt 記在自己的 server log。
+			sendStreamError(writer, "UPSTREAM_ERROR", "AI 服務發生錯誤")
 
 			// Types we intentionally skip:
 			// "start"                           — stream start metadata
