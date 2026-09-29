@@ -13,20 +13,21 @@ import (
 
 // shareStore handles persistence for share links and their shared messages.
 type shareStore struct {
-	db *sqlx.DB
+	db     *sqlx.DB
+	schema schema
 }
 
-// NewShare creates a new Share store backed by sqlx.
-func NewShare(db *sqlx.DB) Share {
-	return &shareStore{db: db}
+// NewShare creates a new Share store backed by sqlx; schemaName as in NewAgent.
+func NewShare(db *sqlx.DB, schemaName string) Share {
+	return &shareStore{db: db, schema: newSchema(schemaName)}
 }
 
 func (s *shareStore) CreateShareLink(ctx context.Context, shareLink *models.ShareLink) error {
 	query := `
-		INSERT INTO share_links (id, type, reference_id, user_id, created_at, updated_at)
+		INSERT INTO {schema}.share_links (id, type, reference_id, user_id, created_at, updated_at)
 		VALUES (:id, :type, :reference_id, :user_id, :created_at, :updated_at)
 	`
-	if _, err := s.db.NamedExec(query, shareLink); err != nil {
+	if _, err := s.db.NamedExec(s.schema.sql(query), shareLink); err != nil {
 		logging.Errorw(ctx, "Failed to create share link",
 			"id", shareLink.ID,
 			"reference_id", shareLink.ReferenceID,
@@ -37,9 +38,9 @@ func (s *shareStore) CreateShareLink(ctx context.Context, shareLink *models.Shar
 }
 
 func (s *shareStore) GetShareLink(ctx context.Context, id string) (*models.ShareLink, error) {
-	query := `SELECT id, type, reference_id, user_id, short_code, created_at, deleted_at, updated_at FROM share_links WHERE id = $1`
+	query := `SELECT id, type, reference_id, user_id, short_code, created_at, deleted_at, updated_at FROM {schema}.share_links WHERE id = $1`
 	var link models.ShareLink
-	if err := s.db.Get(&link, query, id); err != nil {
+	if err := s.db.Get(&link, s.schema.sql(query), id); err != nil {
 		logging.Errorw(ctx, "Share link not found",
 			"id", id,
 			"error", err.Error())
@@ -64,7 +65,7 @@ func (s *shareStore) ListSharedMessages(ctx context.Context, threadID string, en
 			m.role,
 			m.type,
 			COALESCE(m."createdAtZ", m."createdAt") AS "createdAt"
-		FROM mastra_messages m
+		FROM {schema}.mastra_messages m
 		WHERE m.thread_id = $1
 		AND m.role IN ('user', 'assistant')
 		AND COALESCE(m."createdAtZ", m."createdAt") <= $2
@@ -75,7 +76,7 @@ func (s *shareStore) ListSharedMessages(ctx context.Context, threadID string, en
 	if cursor != "" {
 		query += fmt.Sprintf(`
 		AND COALESCE(m."createdAtZ", m."createdAt") > (
-			SELECT COALESCE("createdAtZ", "createdAt") FROM mastra_messages WHERE id = $%d
+			SELECT COALESCE("createdAtZ", "createdAt") FROM {schema}.mastra_messages WHERE id = $%d
 		)
 		`, argIdx)
 		args = append(args, cursor)
@@ -89,7 +90,7 @@ func (s *shareStore) ListSharedMessages(ctx context.Context, threadID string, en
 	args = append(args, count+1)
 
 	var rows []models.MessageWithFeedback
-	if err := s.db.Select(&rows, query, args...); err != nil {
+	if err := s.db.Select(&rows, s.schema.sql(query), args...); err != nil {
 		logging.Errorw(ctx, "Failed to list shared messages",
 			"thread_id", threadID,
 			"error", err.Error())
@@ -99,8 +100,8 @@ func (s *shareStore) ListSharedMessages(ctx context.Context, threadID string, en
 }
 
 func (s *shareStore) UpdateShareLinkShortCode(ctx context.Context, id, shortCode string) error {
-	query := `UPDATE share_links SET short_code = $1, updated_at = NOW() WHERE id = $2`
-	if _, err := s.db.Exec(query, shortCode, id); err != nil {
+	query := `UPDATE {schema}.share_links SET short_code = $1, updated_at = NOW() WHERE id = $2`
+	if _, err := s.db.Exec(s.schema.sql(query), shortCode, id); err != nil {
 		logging.Errorw(ctx, "Failed to update share link short code",
 			"id", id,
 			"error", err.Error())

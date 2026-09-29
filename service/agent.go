@@ -35,6 +35,24 @@ type agentService struct {
 // streamHandle identifies one active stream and carries its cancel function.
 type streamHandle struct {
 	cancel context.CancelFunc
+	// ready is closed once the upstream request has answered or failed;
+	// runID is set before that: pen-gpt's run id (x-stream-run-id), or ""
+	// when no run was opened.
+	ready     chan struct{}
+	readyOnce sync.Once
+	runID     string
+}
+
+func newStreamHandle(cancel context.CancelFunc) *streamHandle {
+	return &streamHandle{cancel: cancel, ready: make(chan struct{})}
+}
+
+// settle records the run id the upstream answered with. Only the first call counts.
+func (h *streamHandle) settle(runID string) {
+	h.readyOnce.Do(func() {
+		h.runID = runID
+		close(h.ready)
+	})
 }
 
 // NewAgent creates a new Agent service. streamPath 可選（最多一個），
@@ -703,58 +721,100 @@ func extractHasResults(result interface{}) *bool {
 //     held by doUpstreamStream. Without this, the BFF would keep reading
 //     until the upstream connection naturally closes.
 //
-//  2. Remote stop — calls Mastra's /custom/api/chat/stop endpoint, which
-//     fires the AbortController inside the Mastra process and actually
-//     terminates the running agent.stream(). This is the only step that
-//     stops the LLM and prevents partial messages from being persisted to
-//     memory, because Cloud Run + HTTP/1.1 will not propagate the local
-//     TCP close to the Mastra container.
+//  2. Remote stop — calls pen-gpt's /stop endpoint for one run, which
+//     aborts the running agent.stream() on whichever pen-gpt instance runs
+//     it. This is the only step that stops the LLM and prevents partial
+//     messages from being persisted to memory, because Cloud Run +
+//     HTTP/1.1 will not propagate the local TCP close to the container.
 //
-// Returns ErrorNotFound only if BOTH the local map and the upstream
-// registry had no matching stream — i.e. the stream genuinely does not
-// exist (already finished, never started, or wrong identifiers).
+// The run is fixed once per call: the one this BFF instance streams, or,
+// when another instance streams it, the thread's running run in
+// stream_runs. A stop never names only the thread, so it cannot reach a
+// newer run. Returns ErrorNotFound when there is no run to stop, and an
+// internal error when pen-gpt could not record the stop.
 func (svc *agentService) PauseStream(ctx context.Context, threadID, userID string) error {
-	// Step 1: local cancel.
-	localCancelled := svc.cancelLocalStream(threadID)
-
-	// Step 2: remote stop. Use a fresh bounded context so an already-
-	// expired parent ctx (e.g. the inbound request was already torn down)
-	// does not prevent us from reaching the upstream stop endpoint.
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// A fresh bounded context so an already-expired parent ctx (e.g. the
+	// inbound request was already torn down) does not prevent the stop.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), pauseTimeout)
 	defer stopCancel()
-	remoteOk, remoteErr := svc.callRemoteStop(stopCtx, threadID, userID)
 
+	runID, localCancelled, err := svc.pauseTarget(stopCtx, threadID, userID)
+	if err != nil {
+		logging.Errorw(ctx, "failed to find the run to pause",
+			"thread_id", threadID,
+			"user_id", userID,
+			"local_cancelled", localCancelled,
+			"error", err.Error())
+		return e.Wrap(e.ErrorInternalError, "failed to find the stream to pause")
+	}
+	if runID == "" {
+		if localCancelled {
+			return nil
+		}
+		logging.Infow(ctx, "no active stream to pause", "thread_id", threadID, "user_id", userID)
+		return e.Wrap(e.ErrorNotFound, "no active stream found for thread")
+	}
+
+	remoteOk, remoteErr := svc.callRemoteStop(stopCtx, threadID, runID, userID)
 	if remoteErr != nil {
 		logging.Errorw(ctx, "remote stop failed",
 			"thread_id", threadID,
 			"user_id", userID,
+			"run_id", runID,
 			"local_cancelled", localCancelled,
-			"error", remoteErr)
+			"error", remoteErr.Error())
+		return e.Wrap(e.ErrorInternalError, "failed to stop the upstream stream")
 	}
-
-	// If neither side knew about this stream, surface a not-found so the
-	// caller can decide how to handle it (e.g. tell the user the stream
-	// was already finished).
-	if !localCancelled && !remoteOk && remoteErr == nil {
-		logging.Infow(ctx, "no active stream to pause",
-			"thread_id", threadID,
-			"user_id", userID,
-			"active_streams_count", len(svc.activeStreams))
+	// ok:false: the run already finished its generation or ended.
+	if !remoteOk && !localCancelled {
+		logging.Infow(ctx, "no active stream to pause", "thread_id", threadID, "user_id", userID, "run_id", runID)
 		return e.Wrap(e.ErrorNotFound, "no active stream found for thread")
 	}
-
 	return nil
 }
 
-// cancelLocalStream cancels the local request context for a stream and
-// removes the entry from the active streams map. Returns true if a
-// matching entry was found and cancelled.
-func (svc *agentService) cancelLocalStream(threadID string) bool {
+// pauseTimeout bounds a whole PauseStream: waiting for the run id, the
+// stream_runs lookup and the remote stop.
+const pauseTimeout = 5 * time.Second
+
+// pauseTarget cancels this instance's stream on the thread, if any, and
+// returns the run to stop remotely ("" when there is none).
+func (svc *agentService) pauseTarget(ctx context.Context, threadID, userID string) (string, bool, error) {
+	svc.streamMutex.RLock()
+	h := svc.activeStreams[threadID]
+	svc.streamMutex.RUnlock()
+
+	if h != nil {
+		// The run id arrives with pen-gpt's response headers, before any
+		// text; a pause that lands earlier waits for it so the stop still
+		// names its run.
+		settled := false
+		select {
+		case <-h.ready:
+			settled = true
+		case <-ctx.Done():
+		}
+		cancelled := svc.cancelLocalStream(threadID, h)
+		if settled {
+			return h.runID, cancelled, nil
+		}
+		// No answer in time: pen-gpt may have opened the run meanwhile.
+		runID, err := svc.s.FindRunningRunID(ctx, userID, threadID)
+		return runID, cancelled, err
+	}
+
+	runID, err := svc.s.FindRunningRunID(ctx, userID, threadID)
+	return runID, false, err
+}
+
+// cancelLocalStream cancels the stream h and removes it from the active
+// streams map, unless a newer stream on the thread has replaced it. Returns
+// true if h was still the thread's stream.
+func (svc *agentService) cancelLocalStream(threadID string, h *streamHandle) bool {
 	svc.streamMutex.Lock()
 	defer svc.streamMutex.Unlock()
 
-	h, exists := svc.activeStreams[threadID]
-	if !exists {
+	if svc.activeStreams[threadID] != h {
 		return false
 	}
 	h.cancel()

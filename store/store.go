@@ -17,6 +17,9 @@ type Agent interface {
 	UpdateThreadPin(ctx context.Context, userID, threadID string, isPinned bool) error
 	ListMessages(ctx context.Context, threadID, userID, cursor string, count int) ([]models.MessageWithFeedback, error)
 	UpsertFeedback(ctx context.Context, userID, messageID, feedback string) error
+	// FindRunningRunID returns the run id of the thread's `running` run in
+	// pen-gpt's stream_runs, or "" when the thread has none.
+	FindRunningRunID(ctx context.Context, userID, threadID string) (string, error)
 
 	Share
 }

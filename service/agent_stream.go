@@ -52,6 +52,9 @@ const (
 	remoteStopTimeout = 10 * time.Second
 )
 
+// streamRunIDHeader names the pen-gpt run a stream response belongs to; /stop takes it as runId.
+const streamRunIDHeader = "x-stream-run-id"
+
 // mastraWorkflowEvent represents a workflow event nested inside tool-output payload.output.
 type mastraWorkflowEvent struct {
 	Type    string                 `json:"type"`
@@ -71,7 +74,7 @@ func (svc *agentService) StreamChat(ctx context.Context, userID string, req *mod
 	// Register this stream so it can be cancelled. One active stream per
 	// thread: a new stream supersedes (cancels) any stream still running on
 	// the same thread, so its cancel handle is never silently lost.
-	h := &streamHandle{cancel: cancel}
+	h := newStreamHandle(cancel)
 	svc.streamMutex.Lock()
 	if old, ok := svc.activeStreams[req.ThreadID]; ok {
 		old.cancel()
@@ -95,7 +98,7 @@ func (svc *agentService) StreamChat(ctx context.Context, userID string, req *mod
 	}
 
 	// Execute the upstream stream; collect references/recommendations and any error.
-	refs, recs, streamErr := svc.doUpstreamStream(streamCtx, userID, req, writer)
+	refs, recs, streamErr := svc.doUpstreamStream(streamCtx, userID, req, writer, h)
 
 	// Always send accumulated references, recommendations, finish, and done —
 	// even on error — so the client can properly clean up its streaming state.
@@ -147,7 +150,10 @@ func userContent(req *models.StreamRequest) any {
 // doUpstreamStream handles the actual upstream request and stream parsing.
 // It returns collected references, raw recommendations, and any error encountered.
 // 回傳 error 時一定已經送過一次 error event 給 client。
-func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, req *models.StreamRequest, writer StreamWriter) ([]models.Reference, []json.RawMessage, error) {
+func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, req *models.StreamRequest, writer StreamWriter, h *streamHandle) ([]models.Reference, []json.RawMessage, error) {
+	// Every path that returns before the run id is known opened no run.
+	defer h.settle("")
+
 	// Build upstream request to pen-gpt Mastra agent.
 	//
 	// We hit the custom stream endpoint（預設 /custom/api/chat/stream，可由
@@ -204,6 +210,7 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		h.settle("")
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamLogLimit))
 		logging.Errorw(ctx, "upstream stream returned non-OK status",
 			"status_code", resp.StatusCode,
@@ -212,6 +219,9 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 		sendStreamError(writer, "UPSTREAM_ERROR", "AI 服務發生錯誤")
 		return nil, nil, fmt.Errorf("upstream stream returned status %d", resp.StatusCode)
 	}
+
+	// The run this response streams: what /stop names to stop it and no other.
+	h.settle(resp.Header.Get(streamRunIDHeader))
 
 	// Parse the upstream SSE stream line by line.
 	// Mastra modern /stream returns SSE-wrapped JSON chunks where all data
@@ -347,7 +357,7 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 		logging.Errorw(ctx, "upstream stream read failed", "error", err.Error(), "thread_id", req.ThreadID)
 		sendStreamError(writer, "UPSTREAM_ERROR", "AI 服務發生錯誤")
 		// 讀取中斷（逾時、連線斷掉）時 pen-gpt 可能還在跑，本地關連線傳不到它，要明確叫停。
-		svc.stopAfterFailure(ctx, req.ThreadID, userID)
+		svc.stopAfterFailure(ctx, req.ThreadID, h.runID, userID)
 		return refs, recs, fmt.Errorf("read upstream stream: %w", err)
 	}
 
@@ -360,12 +370,16 @@ func stopped(ctx context.Context) bool {
 	return ctx.Err() != nil && errors.Is(context.Cause(ctx), context.Canceled)
 }
 
-// stopAfterFailure 在上游讀取失敗後叫 pen-gpt 停止這個 thread 的串流；失敗只記 log。
-func (svc *agentService) stopAfterFailure(ctx context.Context, threadID, userID string) {
+// stopAfterFailure 在上游讀取失敗後叫 pen-gpt 停止這一輪（runID）；沒有 runID 就沒有能停的 run。失敗只記 log。
+func (svc *agentService) stopAfterFailure(ctx context.Context, threadID, runID, userID string) {
+	if runID == "" {
+		logging.Errorw(ctx, "upstream stream has no run id to stop", "thread_id", threadID)
+		return
+	}
 	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), remoteStopTimeout)
 	defer cancel()
-	if _, err := svc.callRemoteStop(stopCtx, threadID, userID); err != nil {
-		logging.Errorw(ctx, "failed to stop upstream after stream failure", "error", err.Error(), "thread_id", threadID)
+	if _, err := svc.callRemoteStop(stopCtx, threadID, runID, userID); err != nil {
+		logging.Errorw(ctx, "failed to stop upstream after stream failure", "error", err.Error(), "thread_id", threadID, "run_id", runID)
 	}
 }
 
@@ -378,12 +392,12 @@ func (svc *agentService) stopAfterFailure(ctx context.Context, threadID, userID 
 //   - (true, nil)  : upstream confirmed an active stream was aborted
 //   - (false, nil) : upstream returned 200 but had no matching stream
 //   - (false, err) : transport, auth, or non-200 response
-func (svc *agentService) callRemoteStop(ctx context.Context, threadID, userID string) (bool, error) {
+func (svc *agentService) callRemoteStop(ctx context.Context, threadID, runID, userID string) (bool, error) {
 	// stop 路徑跟著 streamPath 走：/custom/api/{ns}/stream → /custom/api/{ns}/stop
 	// （chat 與 windoc 皆同此慣例；abort registry 以 ns 隔命名空間，打錯 ns 停不掉）。
 	stopURL := svc.agentStreamURL + strings.TrimSuffix(svc.streamPath, "/stream") + "/stop"
 
-	body, err := json.Marshal(map[string]string{"threadId": threadID})
+	body, err := json.Marshal(map[string]string{"threadId": threadID, "runId": runID})
 	if err != nil {
 		return false, fmt.Errorf("marshal stop body: %w", err)
 	}

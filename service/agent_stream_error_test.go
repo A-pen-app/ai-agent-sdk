@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -156,14 +157,27 @@ func TestUpstreamUnreachable(t *testing.T) {
 	assertSingleError(t, events, err, "UPSTREAM_ERROR", "AI 服務暫時無法使用，請稍後再試")
 }
 
-// stopRecorder 接 pen-gpt 的 /stop，記下被叫停的次數。
+// testRunID 是假 pen-gpt 在 stream response header 回的 run id。
+const testRunID = "3b241101-e2bb-4255-8caf-4136c566a962"
+
+// stopRecorder 接 pen-gpt 的 /stop，只算帶對 runId 的 stop（和 pen-gpt 一樣，缺 runId 回 400）；
+// stream 回應帶 x-stream-run-id。
 func stopRecorder(stops *atomic.Int32, stream http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/custom/api/windoc/stop" {
+			var body struct {
+				ThreadID string `json:"threadId"`
+				RunID    string `json:"runId"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RunID != testRunID {
+				http.Error(w, `{"error":"runId is required"}`, http.StatusBadRequest)
+				return
+			}
 			stops.Add(1)
 			fmt.Fprint(w, `{"ok":true}`)
 			return
 		}
+		w.Header().Set(streamRunIDHeader, testRunID)
 		stream(w, r)
 	}
 }
