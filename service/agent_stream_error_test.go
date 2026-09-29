@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -29,14 +30,14 @@ const leaked = "relation windoc_core.secret_table does not exist"
 // fakeStore 只實作 finish event 用到的 ListMessages；onList 在送 finish 前被呼叫。
 type fakeStore struct {
 	store.Agent
-	onList func()
+	onList func(ctx context.Context)
 }
 
-func (f fakeStore) ListMessages(context.Context, string, string, string, int) ([]models.MessageWithFeedback, error) {
+func (f fakeStore) ListMessages(ctx context.Context, _, _, _ string, _ int) ([]models.MessageWithFeedback, error) {
 	if f.onList != nil {
-		f.onList()
+		f.onList(ctx)
 	}
-	return nil, nil
+	return nil, ctx.Err()
 }
 
 func newTestAgent(url string, st fakeStore) *agentService {
@@ -127,7 +128,7 @@ func TestUpstreamErrorChunkWaitsForUpstreamClose(t *testing.T) {
 	defer upstream.Close()
 
 	listedAfterClose := false
-	st := fakeStore{onList: func() {
+	st := fakeStore{onList: func(context.Context) {
 		select {
 		case <-upstreamDone:
 			listedAfterClose = true
@@ -155,18 +156,91 @@ func TestUpstreamUnreachable(t *testing.T) {
 	assertSingleError(t, events, err, "UPSTREAM_ERROR", "AI 服務暫時無法使用，請稍後再試")
 }
 
-// 串流中途斷掉（這裡用超過 scanner 上限的一行）要回報失敗，不能當成正常結束。
+// stopRecorder 接 pen-gpt 的 /stop，記下被叫停的次數。
+func stopRecorder(stops *atomic.Int32, stream http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/custom/api/windoc/stop" {
+			stops.Add(1)
+			fmt.Fprint(w, `{"ok":true}`)
+			return
+		}
+		stream(w, r)
+	}
+}
+
+// 串流中途斷掉（這裡用超過 scanner 上限的一行）要回報失敗，不能當成正常結束，並叫 pen-gpt 停止。
 func TestUpstreamReadFailureIsReported(t *testing.T) {
-	events, err := runUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+	var stops atomic.Int32
+	events, err := runUpstream(t, stopRecorder(&stops, func(w http.ResponseWriter, r *http.Request) {
 		writeChunk(w, `{"type":"text-delta","payload":{"text":"partial"}}`)
 		fmt.Fprintf(w, "data: %s\n\n", strings.Repeat("a", 2*1024*1024))
-	})
+	}))
 	if !errors.Is(err, ErrClientNotified) {
 		t.Fatalf("want ErrClientNotified, got %v", err)
 	}
 	want := "start,text_delta,error,finish,done"
 	if got := eventTypes(events); got != want {
 		t.Fatalf("want events %s, got %s", want, got)
+	}
+	if stops.Load() != 1 {
+		t.Fatalf("want 1 upstream stop, got %d", stops.Load())
+	}
+}
+
+// 呼叫端帶 cause 取消（如逾時）是失敗：送一個 error event、回 ErrClientNotified、叫 pen-gpt 停止。
+func TestCancelWithCauseIsReported(t *testing.T) {
+	var stops atomic.Int32
+	upstream := httptest.NewServer(stopRecorder(&stops, func(w http.ResponseWriter, r *http.Request) {
+		writeChunk(w, `{"type":"text-delta","payload":{"text":"partial"}}`)
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	var events []*models.StreamEnvelope
+	writer := func(e *models.StreamEnvelope) error {
+		events = append(events, e)
+		if e.Event == models.StreamEventTextDelta {
+			cancel(errors.New("idle timeout"))
+		}
+		return nil
+	}
+	err := newTestAgent(upstream.URL, fakeStore{}).StreamChat(ctx, "u1", &models.StreamRequest{ThreadID: "t1", Query: "q"}, writer)
+	if !errors.Is(err, ErrClientNotified) {
+		t.Fatalf("want ErrClientNotified, got %v", err)
+	}
+	if got := eventTypes(events); got != "start,text_delta,error,finish,done" {
+		t.Fatalf("unexpected events %s", got)
+	}
+	if stops.Load() != 1 {
+		t.Fatalf("want 1 upstream stop, got %d", stops.Load())
+	}
+}
+
+// 被停止後 finish 仍查得到訊息：查詢不能沿用已取消的串流 context。
+func TestStoppedStreamStillListsMessages(t *testing.T) {
+	var stops atomic.Int32
+	upstream := httptest.NewServer(stopRecorder(&stops, func(w http.ResponseWriter, r *http.Request) {
+		writeChunk(w, `{"type":"text-delta","payload":{"text":"partial"}}`)
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	var listErr error
+	svc := newTestAgent(upstream.URL, fakeStore{onList: func(ctx context.Context) { listErr = ctx.Err() }})
+	writer := func(e *models.StreamEnvelope) error {
+		if e.Event == models.StreamEventTextDelta {
+			if err := svc.PauseStream(context.Background(), "t1", "u1"); err != nil {
+				t.Errorf("PauseStream: %v", err)
+			}
+		}
+		return nil
+	}
+	if err := svc.StreamChat(context.Background(), "u1", &models.StreamRequest{ThreadID: "t1", Query: "q"}, writer); err != nil {
+		t.Fatalf("want nil, got %v", err)
+	}
+	if listErr != nil {
+		t.Fatalf("finish listed messages with a cancelled context: %v", listErr)
 	}
 }
 

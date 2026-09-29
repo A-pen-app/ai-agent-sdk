@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/A-pen-app/ai-agent-sdk/models"
 	"github.com/A-pen-app/logging"
@@ -45,6 +46,11 @@ var ErrClientNotified = errors.New("stream failed, client already notified")
 
 // upstreamLogLimit 限制寫進 log 的上游錯誤內容長度。
 const upstreamLogLimit = 2048
+
+const (
+	finishListTimeout = 10 * time.Second
+	remoteStopTimeout = 10 * time.Second
+)
 
 // mastraWorkflowEvent represents a workflow event nested inside tool-output payload.output.
 type mastraWorkflowEvent struct {
@@ -100,10 +106,13 @@ func (svc *agentService) StreamChat(ctx context.Context, userID string, req *mod
 		_ = writer(&models.StreamEnvelope{Event: models.StreamEventRecommendations, Data: recs})
 	}
 
-	// Send finish with the full message list from DB.
-	messages, err := svc.ListMessages(streamCtx, req.ThreadID, userID, "", 100)
+	// Send finish with the full message list from DB. 串流被停止時 streamCtx 已取消，
+	// 改用不受取消影響的 context 查，client 才拿得到停止前已存的訊息。
+	listCtx, listCancel := context.WithTimeout(context.WithoutCancel(ctx), finishListTimeout)
+	defer listCancel()
+	messages, err := svc.ListMessages(listCtx, req.ThreadID, userID, "", 100)
 	if err != nil {
-		logging.Error(streamCtx, "failed to list messages for finish event: %v", err)
+		logging.Error(ctx, "failed to list messages for finish event: %v", err)
 		_ = writer(&models.StreamEnvelope{Event: models.StreamEventFinish, Data: []models.MessageResponse{}})
 	} else {
 		_ = writer(&models.StreamEnvelope{Event: models.StreamEventFinish, Data: messages.Data})
@@ -337,6 +346,8 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 	if err := scanner.Err(); err != nil && upstreamErr == nil && !stopped(ctx) {
 		logging.Errorw(ctx, "upstream stream read failed", "error", err.Error(), "thread_id", req.ThreadID)
 		sendStreamError(writer, "UPSTREAM_ERROR", "AI 服務發生錯誤")
+		// 讀取中斷（逾時、連線斷掉）時 pen-gpt 可能還在跑，本地關連線傳不到它，要明確叫停。
+		svc.stopAfterFailure(ctx, req.ThreadID, userID)
 		return refs, recs, fmt.Errorf("read upstream stream: %w", err)
 	}
 
@@ -344,8 +355,18 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 }
 
 // stopped 表示串流是被停止的（PauseStream、同 thread 新串流、client 離開），不是上游失敗。
+// 帶 cause 的取消（呼叫端用 context.WithCancelCause 標出逾時等原因）算失敗，照樣送 error event。
 func stopped(ctx context.Context) bool {
-	return errors.Is(ctx.Err(), context.Canceled)
+	return ctx.Err() != nil && errors.Is(context.Cause(ctx), context.Canceled)
+}
+
+// stopAfterFailure 在上游讀取失敗後叫 pen-gpt 停止這個 thread 的串流；失敗只記 log。
+func (svc *agentService) stopAfterFailure(ctx context.Context, threadID, userID string) {
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), remoteStopTimeout)
+	defer cancel()
+	if _, err := svc.callRemoteStop(stopCtx, threadID, userID); err != nil {
+		logging.Errorw(ctx, "failed to stop upstream after stream failure", "error", err.Error(), "thread_id", threadID)
+	}
 }
 
 // callRemoteStop calls Mastra's /custom/api/chat/stop endpoint to abort an
