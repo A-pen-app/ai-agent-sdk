@@ -24,7 +24,7 @@ type agentService struct {
 	agentStreamURL string
 	streamPath     string // upstream SSE 端點路徑，預設 /custom/api/chat/stream
 	httpClient     *http.Client
-	idToken        func(ctx context.Context, audience string) (string, error)
+	idToken        func() (string, error)
 	// Stream management: one active stream per thread. The handle's pointer
 	// identity lets the owning goroutine deregister only its own entry (a
 	// newer stream on the same thread may have superseded it).
@@ -54,7 +54,7 @@ func NewAgent(s store.Agent, agentStreamURL string, streamPath ...string) Agent 
 		agentStreamURL: agentStreamURL,
 		streamPath:     sp,
 		httpClient:     httpClient,
-		idToken:        cloudRunIDToken,
+		idToken:        (&cloudRunIDTokenSource{audience: agentStreamURL}).token,
 		activeStreams:  make(map[string]*streamHandle),
 	}
 }

@@ -9,8 +9,11 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/A-pen-app/ai-agent-sdk/models"
+	"github.com/A-pen-app/ai-agent-sdk/store"
 	"github.com/A-pen-app/logging"
 )
 
@@ -23,37 +26,75 @@ func TestMain(m *testing.M) {
 
 const leaked = "relation windoc_core.secret_table does not exist"
 
-func runUpstream(t *testing.T, handler http.HandlerFunc) ([]*models.StreamEnvelope, error) {
-	t.Helper()
-	upstream := httptest.NewServer(handler)
-	defer upstream.Close()
+// fakeStore 只實作 finish event 用到的 ListMessages；onList 在送 finish 前被呼叫。
+type fakeStore struct {
+	store.Agent
+	onList func()
+}
 
-	svc := NewAgent(nil, upstream.URL, "/custom/api/windoc/stream").(*agentService)
-	svc.idToken = func(context.Context, string) (string, error) { return "", errors.New("no credentials in tests") }
+func (f fakeStore) ListMessages(context.Context, string, string, string, int) ([]models.MessageWithFeedback, error) {
+	if f.onList != nil {
+		f.onList()
+	}
+	return nil, nil
+}
+
+func newTestAgent(url string, st fakeStore) *agentService {
+	svc := NewAgent(st, url, "/custom/api/windoc/stream").(*agentService)
+	svc.idToken = func() (string, error) { return "", errors.New("no credentials in tests") }
+	return svc
+}
+
+func streamChat(ctx context.Context, svc *agentService) ([]*models.StreamEnvelope, error) {
 	var events []*models.StreamEnvelope
 	writer := func(e *models.StreamEnvelope) error {
 		events = append(events, e)
 		return nil
 	}
-	_, _, err := svc.doUpstreamStream(context.Background(), "u1", &models.StreamRequest{ThreadID: "t1", Query: "q"}, writer)
+	err := svc.StreamChat(ctx, "u1", &models.StreamRequest{ThreadID: "t1", Query: "q"}, writer)
 	return events, err
 }
 
-func assertSingleFixedError(t *testing.T, events []*models.StreamEnvelope, err error) {
+func runUpstream(t *testing.T, handler http.HandlerFunc) ([]*models.StreamEnvelope, error) {
 	t.Helper()
-	if !errors.Is(err, ErrUpstream) {
-		t.Fatalf("want ErrUpstream, got %v", err)
+	upstream := httptest.NewServer(handler)
+	defer upstream.Close()
+	return streamChat(context.Background(), newTestAgent(upstream.URL, fakeStore{}))
+}
+
+func eventTypes(events []*models.StreamEnvelope) string {
+	types := make([]string, len(events))
+	for i, e := range events {
+		types[i] = string(e.Event)
 	}
-	if len(events) != 1 || events[0].Event != models.StreamEventError {
-		t.Fatalf("want one error event, got %#v", events)
+	return strings.Join(types, ",")
+}
+
+// 失敗時 client 只收到一個 error event，finish/done 照送，呼叫端拿到 ErrClientNotified。
+func assertSingleError(t *testing.T, events []*models.StreamEnvelope, err error, code, message string) {
+	t.Helper()
+	if !errors.Is(err, ErrClientNotified) {
+		t.Fatalf("want ErrClientNotified, got %v", err)
 	}
-	data := events[0].Data.(models.StreamErrorData)
-	if data.Code != "UPSTREAM_ERROR" || data.Message != "AI 服務發生錯誤" {
+	want := strings.Join([]string{
+		string(models.StreamEventStart), string(models.StreamEventError),
+		string(models.StreamEventFinish), string(models.StreamEventDone),
+	}, ",")
+	if got := eventTypes(events); got != want {
+		t.Fatalf("want events %s, got %s", want, got)
+	}
+	data := events[1].Data.(models.StreamErrorData)
+	if data.Code != code || data.Message != message {
 		t.Fatalf("unexpected error event: %#v", data)
 	}
 	if strings.Contains(data.Message, leaked) {
 		t.Fatal("upstream error text leaked to client")
 	}
+}
+
+func writeChunk(w http.ResponseWriter, chunk string) {
+	fmt.Fprintf(w, "data: %s\n\n", chunk)
+	w.(http.Flusher).Flush()
 }
 
 // 上游 error chunk 的原文不能出現在給 client 的 error event。
@@ -65,28 +106,94 @@ func TestUpstreamErrorChunkIsFixed(t *testing.T) {
 	for name, payload := range cases {
 		t.Run(name, func(t *testing.T) {
 			events, err := runUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				fmt.Fprintf(w, "data: {\"type\":\"error\",\"payload\":{\"error\":%s}}\n\n", payload)
+				writeChunk(w, fmt.Sprintf(`{"type":"error","payload":{"error":%s}}`, payload))
 			})
-			assertSingleFixedError(t, events, err)
+			assertSingleError(t, events, err, "UPSTREAM_ERROR", "AI 服務發生錯誤")
 		})
 	}
 }
 
-// 第一個 error chunk 之後的 chunk（含重複的 error）都不轉給 client。
-func TestUpstreamErrorChunkEndsStream(t *testing.T) {
-	events, err := runUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"type\":\"error\",\"payload\":{\"error\":\"first\"}}\n\n")
-		fmt.Fprint(w, "data: {\"type\":\"error\",\"payload\":{\"error\":\"second\"}}\n\n")
-		fmt.Fprint(w, "data: {\"type\":\"text-delta\",\"payload\":{\"text\":\"after\"}}\n\n")
-	})
-	assertSingleFixedError(t, events, err)
+// error chunk 之後讀到上游關閉才送 finish（pen-gpt 在關閉前清掉殘缺訊息），
+// 之後的 chunk（含重複的 error）都不轉給 client。
+func TestUpstreamErrorChunkWaitsForUpstreamClose(t *testing.T) {
+	upstreamDone := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(upstreamDone)
+		writeChunk(w, `{"type":"error","payload":{"error":"first"}}`)
+		time.Sleep(100 * time.Millisecond) // pen-gpt 收尾
+		writeChunk(w, `{"type":"error","payload":{"error":"second"}}`)
+		writeChunk(w, `{"type":"text-delta","payload":{"text":"after"}}`)
+	}))
+	defer upstream.Close()
+
+	listedAfterClose := false
+	st := fakeStore{onList: func() {
+		select {
+		case <-upstreamDone:
+			listedAfterClose = true
+		default:
+		}
+	}}
+	events, err := streamChat(context.Background(), newTestAgent(upstream.URL, st))
+	assertSingleError(t, events, err, "UPSTREAM_ERROR", "AI 服務發生錯誤")
+	if !listedAfterClose {
+		t.Fatal("finish was built before the upstream closed the stream")
+	}
 }
 
 func TestUpstreamNonOKStatusIsFixed(t *testing.T) {
 	events, err := runUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, leaked, http.StatusServiceUnavailable)
 	})
-	assertSingleFixedError(t, events, err)
+	assertSingleError(t, events, err, "UPSTREAM_ERROR", "AI 服務發生錯誤")
+}
+
+func TestUpstreamUnreachable(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	upstream.Close()
+	events, err := streamChat(context.Background(), newTestAgent(upstream.URL, fakeStore{}))
+	assertSingleError(t, events, err, "UPSTREAM_ERROR", "AI 服務暫時無法使用，請稍後再試")
+}
+
+// 串流中途斷掉（這裡用超過 scanner 上限的一行）要回報失敗，不能當成正常結束。
+func TestUpstreamReadFailureIsReported(t *testing.T) {
+	events, err := runUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		writeChunk(w, `{"type":"text-delta","payload":{"text":"partial"}}`)
+		fmt.Fprintf(w, "data: %s\n\n", strings.Repeat("a", 2*1024*1024))
+	})
+	if !errors.Is(err, ErrClientNotified) {
+		t.Fatalf("want ErrClientNotified, got %v", err)
+	}
+	want := "start,text_delta,error,finish,done"
+	if got := eventTypes(events); got != want {
+		t.Fatalf("want events %s, got %s", want, got)
+	}
+}
+
+// 建不出上游請求時送 INTERNAL_ERROR，一樣回 ErrClientNotified，呼叫端不會再補送。
+func TestInternalErrorIsClientNotified(t *testing.T) {
+	events, err := streamChat(context.Background(), newTestAgent("http://bad host", fakeStore{}))
+	assertSingleError(t, events, err, "INTERNAL_ERROR", "failed to create upstream request")
+}
+
+// 被停止不是失敗：不送 error event，回傳 nil。
+func TestCancelledBeforeResponseIsNotAnError(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	defer upstream.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	events, err := streamChat(ctx, newTestAgent(upstream.URL, fakeStore{}))
+	if err != nil {
+		t.Fatalf("want nil, got %v", err)
+	}
+	if got := eventTypes(events); got != "start,finish,done" {
+		t.Fatalf("unexpected events %s", got)
+	}
+}
+
+func TestLogSnippetKeepsValidUTF8(t *testing.T) {
+	s := logSnippet([]byte(strings.Repeat("錯", upstreamLogLimit)))
+	if !utf8.ValidString(s) || len(s) > upstreamLogLimit || len(s) < upstreamLogLimit-3 {
+		t.Fatalf("bad snippet: len=%d valid=%v", len(s), utf8.ValidString(s))
+	}
 }
