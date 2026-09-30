@@ -85,6 +85,9 @@ type MessageWithFeedback struct {
 	Type      string    `db:"type" json:"type"`
 	Feedback  *string   `db:"feedback_type" json:"feedback,omitempty"`
 	CreatedAt time.Time `db:"createdAt" json:"createdAt"`
+	// EndedStatus is set on a user message whose turn did not complete
+	// normally; see MessageResponse.EndedStatus.
+	EndedStatus *string `db:"ended_status" json:"ended_status,omitempty"`
 }
 
 // --- API response structs ---
@@ -147,6 +150,10 @@ type MessageResponse struct {
 	// Recommendations 是推薦工具（如 windocRecommendTool）result.recommendations
 	// 的原樣 JSON。SDK 不解析內容，由接入產品自行 unmarshal 成自己的型別。
 	Recommendations []json.RawMessage `json:"recommendations,omitempty"`
+	// EndedStatus 只出現在使用者訊息：這一輪沒有正常完成、回答已被移除時，
+	// 是該輪的終態，前端據此顯示標記。stopped 顯示「已停止」、
+	// superseded 顯示「已由新問題取代」、failed 顯示「回覆失敗」。
+	EndedStatus *string `json:"ended_status,omitempty"`
 }
 
 // MessageListResponse is the paginated message list response.
@@ -166,6 +173,8 @@ type SharedMessageResponse struct {
 	Role      string    `json:"role"`
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
+	// EndedStatus: see MessageResponse.EndedStatus.
+	EndedStatus *string `json:"ended_status,omitempty"`
 }
 
 // SharedMessageListResponse is the paginated shared message list response.

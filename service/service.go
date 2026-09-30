@@ -3,8 +3,29 @@ package service
 import (
 	"context"
 
+	"github.com/A-pen-app/ai-agent-sdk/cursor"
 	"github.com/A-pen-app/ai-agent-sdk/models"
 )
+
+// ErrInvalidCursor is returned by ListMessages and ListSharedMessages for a
+// next token they cannot read, including a pre-v0.0.18 cursor (a bare message
+// id). It is cursor.ErrInvalid itself: return it unwrapped and e.Handle
+// answers 400 WRONG_PARAMETER, so the client reloads the first page.
+var ErrInvalidCursor = cursor.ErrInvalid
+
+// nextCursor returns the token after the last of rows, or nil when there is
+// no further page. rows must be in the order the store returned them.
+func nextCursor(rows []models.MessageWithFeedback, hasMore bool) (*string, error) {
+	if !hasMore || len(rows) == 0 {
+		return nil, nil
+	}
+	last := rows[len(rows)-1]
+	token, err := cursor.Encode(cursor.Position{CreatedAt: last.CreatedAt, ID: last.ID})
+	if err != nil {
+		return nil, err
+	}
+	return &token, nil
+}
 
 // StreamWriter is a callback that sends an SSE envelope to the client.
 type StreamWriter func(envelope *models.StreamEnvelope) error

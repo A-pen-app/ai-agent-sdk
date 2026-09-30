@@ -383,3 +383,45 @@ func waitForRun(svc *agentService, runID string) *streamHandle {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// 被暫停的串流要等 pen-gpt 回覆 stop 才查 finish 的訊息清單：pen-gpt 可能在 stop CAS
+// 寫完前就先斷掉上游，這時太早查會先看到回答、重新整理後又消失。
+func TestPausedStreamListsAfterTheStopIsAnswered(t *testing.T) {
+	var stopAnswered atomic.Bool
+	listedBeforeStop := make(chan bool, 1)
+	st := runStore{fakeStore: fakeStore{onList: func(context.Context) { listedBeforeStop <- !stopAnswered.Load() }}}
+	stopRequested := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/custom/api/windoc/stop" {
+			close(stopRequested)
+			time.Sleep(300 * time.Millisecond) // stop CAS 還在寫
+			stopAnswered.Store(true)
+			w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set(streamRunIDHeader, testRunID)
+		writeChunk(w, `{"type":"text-delta","payload":{"text":"partial"}}`)
+		select { // pen-gpt 收到 stop 就先斷掉上游
+		case <-stopRequested:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	svc := NewAgent(st, upstream.URL, "/custom/api/windoc/stream").(*agentService)
+	svc.idToken = func() (string, error) { return "", errors.New("no credentials in tests") }
+
+	done := startStream(svc)
+	for svc.localStream("t1") == nil || !svc.localStream("t1").settled() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := svc.PauseStream(context.Background(), "t1", "u1"); err != nil {
+		t.Fatalf("PauseStream: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("StreamChat: %v", err)
+	}
+	if <-listedBeforeStop {
+		t.Fatal("finish listed the messages before pen-gpt answered the stop")
+	}
+}

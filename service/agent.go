@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/A-pen-app/ai-agent-sdk/cursor"
 	"github.com/A-pen-app/ai-agent-sdk/models"
 	"github.com/A-pen-app/ai-agent-sdk/store"
 	e "github.com/A-pen-app/errors"
@@ -43,10 +45,34 @@ type streamHandle struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 	runID     string
+	// pausing is set by PauseStream before it cancels the stream, and
+	// stopAnswered is closed once pen-gpt answered its stop (or the pause
+	// gave up), so the stream's finish list reads the stop's outcome.
+	pausing          atomic.Bool
+	stopAnswered     chan struct{}
+	stopAnsweredOnce sync.Once
 }
 
 func newStreamHandle(cancel context.CancelFunc) *streamHandle {
-	return &streamHandle{cancel: cancel, ready: make(chan struct{})}
+	return &streamHandle{cancel: cancel, ready: make(chan struct{}), stopAnswered: make(chan struct{})}
+}
+
+func (h *streamHandle) endPause() {
+	h.stopAnsweredOnce.Do(func() { close(h.stopAnswered) })
+}
+
+// waitForStop returns once a pause of this stream has its answer from
+// pen-gpt, at most pauseAnswerTimeout later; at once when it was not paused.
+func (h *streamHandle) waitForStop() {
+	if !h.pausing.Load() {
+		return
+	}
+	timer := time.NewTimer(pauseAnswerTimeout)
+	defer timer.Stop()
+	select {
+	case <-h.stopAnswered:
+	case <-timer.C:
+	}
 }
 
 // settled reports whether the upstream has answered or failed.
@@ -155,8 +181,19 @@ func (svc *agentService) UpdateThreadPin(ctx context.Context, userID, threadID s
 	return svc.s.UpdateThreadPin(ctx, userID, threadID, isPinned)
 }
 
-func (svc *agentService) ListMessages(ctx context.Context, threadID, userID, cursor string, count int) (*models.MessageListResponse, error) {
-	rows, err := svc.s.ListMessages(ctx, threadID, userID, cursor, count)
+func (svc *agentService) ListMessages(ctx context.Context, threadID, userID, token string, count int) (*models.MessageListResponse, error) {
+	// Only the owner reads a thread's messages: another user's, a deleted and
+	// an unknown thread are all ErrorNotFound (404), whatever the cursor, so
+	// they cannot be told apart. The store query repeats the condition for a
+	// thread deleted in between.
+	if _, err := svc.s.GetThread(ctx, threadID, userID); err != nil {
+		return nil, err
+	}
+	after, err := cursor.Decode(token)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := svc.s.ListMessages(ctx, threadID, userID, after, count)
 	if err != nil {
 		return nil, err
 	}
@@ -172,11 +209,12 @@ func (svc *agentService) ListMessages(ctx context.Context, threadID, userID, cur
 		data = append(data, msg)
 	}
 
-	resp := &models.MessageListResponse{Data: data}
-	if hasMore {
-		last := data[len(data)-1].ID
-		resp.Next = &last
+	// rows is still newest first: its last row is the page's lower boundary.
+	next, err := nextCursor(rows, hasMore)
+	if err != nil {
+		return nil, err
 	}
+	resp := &models.MessageListResponse{Data: data, Next: next}
 
 	// Reverse to chronological order (ASC) for display
 	for i, j := 0, len(resp.Data)-1; i < j; i, j = i+1, j-1 {
@@ -226,9 +264,10 @@ func parseMessage(row models.MessageWithFeedback) models.MessageResponse {
 	}
 
 	msg := models.MessageResponse{
-		ID:       row.ID,
-		Role:     row.Role,
-		Feedback: feedback,
+		ID:          row.ID,
+		Role:        row.Role,
+		Feedback:    feedback,
+		EndedStatus: row.EndedStatus,
 	}
 
 	var v2 models.MastraContentV2
@@ -749,6 +788,11 @@ func extractHasResults(result interface{}) *bool {
 // pen-gpt could not record the stop.
 func (svc *agentService) PauseStream(ctx context.Context, threadID, userID string) error {
 	h, runID, err := svc.pauseTarget(threadID, userID)
+	if h != nil {
+		// The stream's finish list waits for this pause's answer (waitForStop).
+		h.pausing.Store(true)
+		defer h.endPause()
+	}
 	if err != nil {
 		logging.Errorw(ctx, "failed to find the run to pause",
 			"thread_id", threadID,
@@ -794,6 +838,10 @@ func (svc *agentService) PauseStream(ctx context.Context, threadID, userID strin
 // pauseWaitTimeout bounds how long a pause waits for this instance's
 // stream to learn its run id from pen-gpt's response headers.
 const pauseWaitTimeout = 5 * time.Second
+
+// pauseAnswerTimeout bounds a whole pause: the wait for the run id, the
+// stream_runs lookup and the remote stop.
+const pauseAnswerTimeout = pauseWaitTimeout + 2*remoteStopTimeout
 
 // pauseTarget returns the stream this pause is bound to and its run.
 //

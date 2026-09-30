@@ -8,9 +8,10 @@ import (
 	"net/http"
 	"time"
 
-	e "github.com/A-pen-app/errors"
+	"github.com/A-pen-app/ai-agent-sdk/cursor"
 	"github.com/A-pen-app/ai-agent-sdk/models"
 	"github.com/A-pen-app/ai-agent-sdk/store"
+	e "github.com/A-pen-app/errors"
 	"github.com/A-pen-app/logging"
 	"github.com/google/uuid"
 )
@@ -77,7 +78,7 @@ func (svc *shareService) GetShareLink(ctx context.Context, id string) (*models.S
 	return link, nil
 }
 
-func (svc *shareService) ListSharedMessages(ctx context.Context, id, cursor string, count int) (*models.SharedMessageListResponse, error) {
+func (svc *shareService) ListSharedMessages(ctx context.Context, id, token string, count int) (*models.SharedMessageListResponse, error) {
 	link, err := svc.s.GetShareLink(ctx, id)
 	if err != nil {
 		return nil, err
@@ -88,7 +89,11 @@ func (svc *shareService) ListSharedMessages(ctx context.Context, id, cursor stri
 		return nil, e.ErrorNotFound
 	}
 
-	rows, err := svc.s.ListSharedMessages(ctx, link.ReferenceID, link.CreatedAt, cursor, count)
+	after, err := cursor.Decode(token)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := svc.s.ListSharedMessages(ctx, link.ReferenceID, link.CreatedAt, after, count)
 	if err != nil {
 		return nil, err
 	}
@@ -102,17 +107,17 @@ func (svc *shareService) ListSharedMessages(ctx context.Context, id, cursor stri
 	for i, row := range rows {
 		content := extractTextContent(row.Content)
 		data[i] = models.SharedMessageResponse{
-			ID:        row.ID,
-			Role:      row.Role,
-			Content:   content,
-			CreatedAt: row.CreatedAt,
+			ID:          row.ID,
+			Role:        row.Role,
+			Content:     content,
+			CreatedAt:   row.CreatedAt,
+			EndedStatus: row.EndedStatus,
 		}
 	}
 
-	var next *string
-	if hasMore && len(data) > 0 {
-		last := data[len(data)-1].ID
-		next = &last
+	next, err := nextCursor(rows, hasMore)
+	if err != nil {
+		return nil, err
 	}
 
 	return &models.SharedMessageListResponse{

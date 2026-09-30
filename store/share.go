@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	e "github.com/A-pen-app/errors"
+	"github.com/A-pen-app/ai-agent-sdk/cursor"
 	"github.com/A-pen-app/ai-agent-sdk/models"
+	e "github.com/A-pen-app/errors"
 	"github.com/A-pen-app/logging"
 	"github.com/jmoiron/sqlx"
 )
@@ -49,42 +50,39 @@ func (s *shareStore) GetShareLink(ctx context.Context, id string) (*models.Share
 	return &link, nil
 }
 
-func (s *shareStore) ListSharedMessages(ctx context.Context, threadID string, endDate time.Time, cursor string, count int) ([]models.MessageWithFeedback, error) {
-	// mastra_messages has two timestamp columns: the legacy "createdAt"
-	// (timestamp WITHOUT time zone, which for older rows holds local wall-clock
-	// and is 8h off real UTC) and "createdAtZ" (timestamptz, the correct UTC
-	// instant). The share link's created_at ($2) is a real timestamptz instant,
-	// so we compare against "createdAtZ" to get a timezone-correct snapshot
-	// bound regardless of server/session timezone. COALESCE falls back to the
-	// legacy column for any row that predates createdAtZ, mirroring Mastra's own
-	// `createdAtZ || createdAt` read path.
-	query := `
+func (s *shareStore) ListSharedMessages(ctx context.Context, threadID string, endDate time.Time, after *cursor.Position, count int) ([]models.MessageWithFeedback, error) {
+	// The share link's created_at ($2) is a timestamptz instant: the snapshot
+	// bound compares it with the same messageCreatedAt the page is ordered on.
+	ended := endedRuns("$1")
+	query := ended.with + `
 		SELECT
 			m.id,
 			m.content,
 			m.role,
 			m.type,
-			COALESCE(m."createdAtZ", m."createdAt") AS "createdAt"
+			` + messageCreatedAt + ` AS "createdAt",
+			` + ended.status + ` AS ended_status
 		FROM {schema}.mastra_messages m
+		` + ended.join + `
 		WHERE m.thread_id = $1
 		AND m.role IN ('user', 'assistant')
-		AND COALESCE(m."createdAtZ", m."createdAt") <= $2
-	`
+		AND ` + messageCreatedAt + ` <= $2
+		` + ended.visible
 	args := []interface{}{threadID, endDate}
 	argIdx := 3
 
-	if cursor != "" {
+	// Oldest first; id breaks ties between messages written in the same
+	// millisecond.
+	if after != nil {
 		query += fmt.Sprintf(`
-		AND COALESCE(m."createdAtZ", m."createdAt") > (
-			SELECT COALESCE("createdAtZ", "createdAt") FROM {schema}.mastra_messages WHERE id = $%d
-		)
-		`, argIdx)
-		args = append(args, cursor)
-		argIdx++
+		AND (`+messageCreatedAt+`, m.id) > ($%d::timestamptz, $%d)
+		`, argIdx, argIdx+1)
+		args = append(args, after.CreatedAt, after.ID)
+		argIdx += 2
 	}
 
 	query += fmt.Sprintf(`
-		ORDER BY COALESCE(m."createdAtZ", m."createdAt") ASC
+		ORDER BY `+messageCreatedAt+` ASC, m.id ASC
 		LIMIT $%d
 	`, argIdx)
 	args = append(args, count+1)
