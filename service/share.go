@@ -13,7 +13,6 @@ import (
 	"github.com/A-pen-app/ai-agent-sdk/store"
 	"github.com/A-pen-app/logging"
 	"github.com/google/uuid"
-	"google.golang.org/api/idtoken"
 )
 
 // shareService implements the Share interface: share-link creation, reading
@@ -22,6 +21,7 @@ type shareService struct {
 	s              store.Agent
 	agentStreamURL string
 	httpClient     *http.Client
+	idToken        func() (string, error)
 }
 
 // NewShare creates a new Share service.
@@ -30,6 +30,7 @@ func NewShare(s store.Agent, agentStreamURL string, httpClient *http.Client) Sha
 		s:              s,
 		agentStreamURL: agentStreamURL,
 		httpClient:     httpClient,
+		idToken:        (&cloudRunIDTokenSource{audience: agentStreamURL}).token,
 	}
 }
 
@@ -149,13 +150,7 @@ func (svc *shareService) ForkThread(ctx context.Context, id, newOwnerID string) 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-user-id", newOwnerID)
 
-	// Attach Google ID token for Cloud Run authentication.
-	// Skip gracefully when running locally with authorized_user credentials.
-	if ts, err := idtoken.NewTokenSource(ctx, svc.agentStreamURL); err == nil {
-		if token, err := ts.Token(); err == nil {
-			req.Header.Set("Authorization", "Bearer "+token.AccessToken)
-		}
-	}
+	setIDToken(ctx, req, svc.idToken)
 
 	resp, err := svc.httpClient.Do(req)
 	if err != nil {
