@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/A-pen-app/ai-agent-sdk/cursor"
 	"github.com/A-pen-app/ai-agent-sdk/models"
 	"github.com/A-pen-app/ai-agent-sdk/store"
 	e "github.com/A-pen-app/errors"
@@ -142,8 +143,12 @@ func (svc *agentService) UpdateThreadPin(ctx context.Context, userID, threadID s
 	return svc.s.UpdateThreadPin(ctx, userID, threadID, isPinned)
 }
 
-func (svc *agentService) ListMessages(ctx context.Context, threadID, userID, cursor string, count int) (*models.MessageListResponse, error) {
-	rows, err := svc.s.ListMessages(ctx, threadID, userID, cursor, count)
+func (svc *agentService) ListMessages(ctx context.Context, threadID, userID, token string, count int) (*models.MessageListResponse, error) {
+	after, err := cursor.Decode(token)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := svc.s.ListMessages(ctx, threadID, userID, after, count)
 	if err != nil {
 		return nil, err
 	}
@@ -159,11 +164,12 @@ func (svc *agentService) ListMessages(ctx context.Context, threadID, userID, cur
 		data = append(data, msg)
 	}
 
-	resp := &models.MessageListResponse{Data: data}
-	if hasMore {
-		last := data[len(data)-1].ID
-		resp.Next = &last
+	// rows is still newest first: its last row is the page's lower boundary.
+	next, err := nextCursor(rows, hasMore)
+	if err != nil {
+		return nil, err
 	}
+	resp := &models.MessageListResponse{Data: data, Next: next}
 
 	// Reverse to chronological order (ASC) for display
 	for i, j := 0, len(resp.Data)-1; i < j; i, j = i+1, j-1 {

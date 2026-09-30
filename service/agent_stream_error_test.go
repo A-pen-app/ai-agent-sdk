@@ -14,6 +14,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/A-pen-app/ai-agent-sdk/cursor"
+	"github.com/A-pen-app/ai-agent-sdk/internal/testdb"
 	"github.com/A-pen-app/ai-agent-sdk/models"
 	"github.com/A-pen-app/ai-agent-sdk/store"
 	"github.com/A-pen-app/logging"
@@ -23,7 +25,10 @@ func TestMain(m *testing.M) {
 	if err := logging.Initialize(nil); err != nil {
 		panic(err)
 	}
-	os.Exit(m.Run())
+	release := testdb.Lock()
+	code := m.Run()
+	release()
+	os.Exit(code)
 }
 
 const leaked = "relation windoc_core.secret_table does not exist"
@@ -34,7 +39,7 @@ type fakeStore struct {
 	onList func(ctx context.Context)
 }
 
-func (f fakeStore) ListMessages(ctx context.Context, _, _, _ string, _ int) ([]models.MessageWithFeedback, error) {
+func (f fakeStore) ListMessages(ctx context.Context, _, _ string, _ *cursor.Position, _ int) ([]models.MessageWithFeedback, error) {
 	if f.onList != nil {
 		f.onList(ctx)
 	}
