@@ -284,9 +284,10 @@ func (s *agentStore) ListMessages(ctx context.Context, threadID, userID, cursor 
 			COALESCE(m."createdAtZ", m."createdAt") AS "createdAt"
 		FROM {schema}.mastra_messages m
 		LEFT JOIN {schema}.response_feedback f ON f.message_id = m.id AND f.user_id = $1 AND f.thread_id = $2
+		LEFT JOIN {schema}.mastra_threads t ON t.id = m.thread_id
 		WHERE m.thread_id = $2
 		AND m.role IN ('user', 'assistant')
-	`
+	` + endedRunMessageFilter
 	args := []interface{}{userID, threadID}
 	argIdx := 3
 

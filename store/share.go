@@ -66,10 +66,11 @@ func (s *shareStore) ListSharedMessages(ctx context.Context, threadID string, en
 			m.type,
 			COALESCE(m."createdAtZ", m."createdAt") AS "createdAt"
 		FROM {schema}.mastra_messages m
+		LEFT JOIN {schema}.mastra_threads t ON t.id = m.thread_id
 		WHERE m.thread_id = $1
 		AND m.role IN ('user', 'assistant')
 		AND COALESCE(m."createdAtZ", m."createdAt") <= $2
-	`
+	` + endedRunMessageFilter
 	args := []interface{}{threadID, endDate}
 	argIdx := 3
 
