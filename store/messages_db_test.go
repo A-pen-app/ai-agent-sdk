@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/A-pen-app/ai-agent-sdk/internal/testdb"
+	"github.com/A-pen-app/ai-agent-sdk/models"
 	"github.com/A-pen-app/logging"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -41,7 +42,7 @@ var content = testdb.Content
 
 func listIDs(t *testing.T, f *fixture, threadID string, count int) []string {
 	t.Helper()
-	rows, err := f.store.ListMessages(context.Background(), threadID, "viewer-is-owner", nil, count)
+	rows, err := f.store.ListMessages(context.Background(), threadID, "owner", nil, count)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
@@ -127,16 +128,99 @@ func TestEndedRunMessagesAreHidden(t *testing.T) {
 	}
 }
 
-func TestMessageWithoutThreadRowIsShown(t *testing.T) {
+// Each user message of an ended run carries the run's status; nothing else
+// carries one.
+func TestEndedRunUserMessageCarriesItsStatus(t *testing.T) {
 	db := openTestDB(t)
 	for _, schemaName := range productSchemas {
 		t.Run(schemaName, func(t *testing.T) {
 			f := newFixture(t, db, schemaName)
-			// No mastra_threads row: the owner is unknown, so nothing is hidden.
+			const owner, thread = "owner", "thread-1"
+			f.Thread(thread, owner)
+			want := map[string]string{}
+			for _, status := range []string{"stopped", "superseded", "failed"} {
+				run := f.Run(owner, thread, status, "pending")
+				f.Message("user-"+status, thread, "user", content(run))
+				want["user-"+status] = status
+			}
+			completed := f.Run(owner, thread, "completed", "not_needed")
+			f.Message("user-completed", thread, "user", content(completed))
+			f.Message("asst-completed", thread, "assistant", content(completed))
+			failedNoMarker := f.Run(owner, thread, "failed", "not_needed")
+			f.Message("user-failed-not-needed", thread, "user", content(failedNoMarker))
+			f.Message("user-no-run", thread, "user", "{}")
+
+			check := func(name string, rows []models.MessageWithFeedback) {
+				t.Helper()
+				if len(rows) != 7 {
+					t.Fatalf("%s returned %d rows, want 7", name, len(rows))
+				}
+				for _, r := range rows {
+					got := ""
+					if r.EndedStatus != nil {
+						got = *r.EndedStatus
+					}
+					if got != want[r.ID] {
+						t.Errorf("%s %s ended_status = %q, want %q", name, r.ID, got, want[r.ID])
+					}
+				}
+			}
+			rows, err := f.store.ListMessages(context.Background(), thread, owner, nil, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check("ListMessages", rows)
+			rows, err = f.store.ListSharedMessages(context.Background(), thread, f.Clock.Add(time.Hour), nil, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check("ListSharedMessages", rows)
+		})
+	}
+}
+
+// ListMessages lists only the caller's own thread that is not deleted.
+func TestListMessagesIsScopedToTheOwner(t *testing.T) {
+	db := openTestDB(t)
+	for _, schemaName := range productSchemas {
+		t.Run(schemaName, func(t *testing.T) {
+			f := newFixture(t, db, schemaName)
+			f.Thread("thread-1", "owner")
+			f.Message("m1", "thread-1", "user", "{}")
+			f.Thread("deleted", "owner")
+			f.Message("d1", "deleted", "user", "{}")
+			f.Exec(`UPDATE {schema}.mastra_threads SET "deletedAt" = NOW() WHERE id = 'deleted'`)
+
+			for _, c := range []struct{ thread, user string }{
+				{"thread-1", "someone-else"},
+				{"deleted", "owner"},
+			} {
+				rows, err := f.store.ListMessages(context.Background(), c.thread, c.user, nil, 10)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(rows) != 0 {
+					t.Errorf("ListMessages(%s, %s) = %d rows, want none", c.thread, c.user, len(rows))
+				}
+			}
+			if got := listIDs(t, f, "thread-1", 10); !slices.Equal(got, []string{"m1"}) {
+				t.Errorf("ListMessages(owner) = %v", got)
+			}
+		})
+	}
+}
+
+func TestMessageWithoutThreadRowIsShownOnlyToShareReaders(t *testing.T) {
+	db := openTestDB(t)
+	for _, schemaName := range productSchemas {
+		t.Run(schemaName, func(t *testing.T) {
+			f := newFixture(t, db, schemaName)
+			// No mastra_threads row: nobody owns it, so ListMessages shows
+			// nothing, and the owner's runs are unknown, so nothing is hidden.
 			run := f.Run("owner", "orphan", "stopped", "pending")
 			f.Message("orphan-asst", "orphan", "assistant", content(run))
 
-			if got := listIDs(t, f, "orphan", 10); !slices.Equal(got, []string{"orphan-asst"}) {
+			if got := listIDs(t, f, "orphan", 10); len(got) != 0 {
 				t.Errorf("ListMessages = %v", got)
 			}
 			if got := sharedIDs(t, f, "orphan", 10); !slices.Equal(got, []string{"orphan-asst"}) {

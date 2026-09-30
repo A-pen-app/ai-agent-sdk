@@ -9,8 +9,8 @@ import (
 
 // ErrInvalidCursor is returned by ListMessages and ListSharedMessages for a
 // next token they cannot read, including a pre-v0.0.18 cursor (a bare message
-// id). It is cursor.ErrInvalid itself; answer it with 400 so the client
-// reloads the first page.
+// id). It is cursor.ErrInvalid itself and wraps e.ErrorWrongParams, so
+// e.Handle answers 400 and the client reloads the first page.
 var ErrInvalidCursor = cursor.ErrInvalid
 
 // nextCursor returns the token after the last of rows, or nil when there is

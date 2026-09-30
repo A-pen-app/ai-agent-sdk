@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"time"
 
-	e "github.com/A-pen-app/errors"
 	"github.com/A-pen-app/ai-agent-sdk/cursor"
 	"github.com/A-pen-app/ai-agent-sdk/models"
 	"github.com/A-pen-app/ai-agent-sdk/store"
+	e "github.com/A-pen-app/errors"
 	"github.com/A-pen-app/logging"
 	"github.com/google/uuid"
 	"google.golang.org/api/idtoken"
@@ -106,10 +106,11 @@ func (svc *shareService) ListSharedMessages(ctx context.Context, id, token strin
 	for i, row := range rows {
 		content := extractTextContent(row.Content)
 		data[i] = models.SharedMessageResponse{
-			ID:        row.ID,
-			Role:      row.Role,
-			Content:   content,
-			CreatedAt: row.CreatedAt,
+			ID:          row.ID,
+			Role:        row.Role,
+			Content:     content,
+			CreatedAt:   row.CreatedAt,
+			EndedStatus: row.EndedStatus,
 		}
 	}
 

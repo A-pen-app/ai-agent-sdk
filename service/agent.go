@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/A-pen-app/ai-agent-sdk/cursor"
@@ -42,10 +43,34 @@ type streamHandle struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 	runID     string
+	// pausing is set by PauseStream before it cancels the stream, and
+	// stopAnswered is closed once pen-gpt answered its stop (or the pause
+	// gave up), so the stream's finish list reads the stop's outcome.
+	pausing          atomic.Bool
+	stopAnswered     chan struct{}
+	stopAnsweredOnce sync.Once
 }
 
 func newStreamHandle(cancel context.CancelFunc) *streamHandle {
-	return &streamHandle{cancel: cancel, ready: make(chan struct{})}
+	return &streamHandle{cancel: cancel, ready: make(chan struct{}), stopAnswered: make(chan struct{})}
+}
+
+func (h *streamHandle) endPause() {
+	h.stopAnsweredOnce.Do(func() { close(h.stopAnswered) })
+}
+
+// waitForStop returns once a pause of this stream has its answer from
+// pen-gpt, at most pauseTimeout later; at once when it was not paused.
+func (h *streamHandle) waitForStop() {
+	if !h.pausing.Load() {
+		return
+	}
+	timer := time.NewTimer(pauseTimeout)
+	defer timer.Stop()
+	select {
+	case <-h.stopAnswered:
+	case <-timer.C:
+	}
 }
 
 // settle records the run id the upstream answered with. Only the first call counts.
@@ -219,9 +244,10 @@ func parseMessage(row models.MessageWithFeedback) models.MessageResponse {
 	}
 
 	msg := models.MessageResponse{
-		ID:       row.ID,
-		Role:     row.Role,
-		Feedback: feedback,
+		ID:          row.ID,
+		Role:        row.Role,
+		Feedback:    feedback,
+		EndedStatus: row.EndedStatus,
 	}
 
 	var v2 models.MastraContentV2
@@ -744,7 +770,10 @@ func (svc *agentService) PauseStream(ctx context.Context, threadID, userID strin
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), pauseTimeout)
 	defer stopCancel()
 
-	runID, localCancelled, err := svc.pauseTarget(stopCtx, threadID, userID)
+	runID, h, localCancelled, err := svc.pauseTarget(stopCtx, threadID, userID)
+	if h != nil {
+		defer h.endPause()
+	}
 	if err != nil {
 		logging.Errorw(ctx, "failed to find the run to pause",
 			"thread_id", threadID,
@@ -784,8 +813,10 @@ func (svc *agentService) PauseStream(ctx context.Context, threadID, userID strin
 const pauseTimeout = 5 * time.Second
 
 // pauseTarget cancels this instance's stream on the thread, if any, and
-// returns the run to stop remotely ("" when there is none).
-func (svc *agentService) pauseTarget(ctx context.Context, threadID, userID string) (string, bool, error) {
+// returns the run to stop remotely ("" when there is none) and the stream's
+// handle, marked as pausing: the caller ends the pause once the stop is
+// answered.
+func (svc *agentService) pauseTarget(ctx context.Context, threadID, userID string) (string, *streamHandle, bool, error) {
 	svc.streamMutex.RLock()
 	h := svc.activeStreams[threadID]
 	svc.streamMutex.RUnlock()
@@ -800,17 +831,18 @@ func (svc *agentService) pauseTarget(ctx context.Context, threadID, userID strin
 			settled = true
 		case <-ctx.Done():
 		}
+		h.pausing.Store(true)
 		cancelled := svc.cancelLocalStream(threadID, h)
 		if settled {
-			return h.runID, cancelled, nil
+			return h.runID, h, cancelled, nil
 		}
 		// No answer in time: pen-gpt may have opened the run meanwhile.
 		runID, err := svc.s.FindRunningRunID(ctx, userID, threadID)
-		return runID, cancelled, err
+		return runID, h, cancelled, err
 	}
 
 	runID, err := svc.s.FindRunningRunID(ctx, userID, threadID)
-	return runID, false, err
+	return runID, nil, false, err
 }
 
 // cancelLocalStream cancels the stream h and removes it from the active

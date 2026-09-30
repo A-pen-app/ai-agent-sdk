@@ -110,7 +110,10 @@ func (svc *agentService) StreamChat(ctx context.Context, userID string, req *mod
 	}
 
 	// Send finish with the full message list from DB. 串流被停止時 streamCtx 已取消，
-	// 改用不受取消影響的 context 查，client 才拿得到停止前已存的訊息。
+	// 改用不受取消影響的 context 查。被 PauseStream 停止時先等 pen-gpt 回覆 stop：
+	// stop 成功，這一輪的回答被隱藏、使用者訊息帶 ended_status；stop 輸給已完成的
+	// 生成（ok:false），回答保留。finish 與之後重新整理看到的一致。
+	h.waitForStop()
 	listCtx, listCancel := context.WithTimeout(context.WithoutCancel(ctx), finishListTimeout)
 	defer listCancel()
 	messages, err := svc.ListMessages(listCtx, req.ThreadID, userID, "", 100)

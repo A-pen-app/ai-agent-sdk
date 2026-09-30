@@ -10,17 +10,19 @@ package cursor
 
 import (
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
+
+	e "github.com/A-pen-app/errors"
 )
 
 // ErrInvalid is returned for a token this version cannot read: malformed,
-// an unknown version, or a pre-v1 cursor (a bare message id). Callers match
-// it with errors.Is and answer 400; the client restarts from the first page.
-var ErrInvalid = errors.New("invalid pagination cursor")
+// an unknown version, or a pre-v1 cursor (a bare message id). It wraps
+// e.ErrorWrongParams, so e.Handle answers 400 and the client restarts from
+// the first page.
+var ErrInvalid = fmt.Errorf("%w: invalid pagination cursor", e.ErrorWrongParams)
 
 const version = "v1"
 
@@ -33,7 +35,7 @@ type Position struct {
 // Encode returns the token for p. CreatedAt is kept to the microsecond,
 // the precision of Postgres timestamps.
 func Encode(p Position) (string, error) {
-	if p.ID == "" || strings.Contains(p.ID, ".") {
+	if p.ID == "" {
 		return "", fmt.Errorf("cursor: message id %q cannot be encoded", p.ID)
 	}
 	raw := version + "." + strconv.FormatInt(p.CreatedAt.UnixMicro(), 10) + "." + p.ID
@@ -49,7 +51,8 @@ func Decode(token string) (*Position, error) {
 	if err != nil {
 		return nil, ErrInvalid
 	}
-	fields := strings.Split(string(raw), ".")
+	// The id is the rest of the token: it may itself contain dots.
+	fields := strings.SplitN(string(raw), ".", 3)
 	if len(fields) != 3 || fields[0] != version || fields[2] == "" {
 		return nil, ErrInvalid
 	}

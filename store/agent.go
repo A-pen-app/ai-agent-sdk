@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	e "github.com/A-pen-app/errors"
 	"github.com/A-pen-app/ai-agent-sdk/cursor"
 	"github.com/A-pen-app/ai-agent-sdk/models"
+	e "github.com/A-pen-app/errors"
 	"github.com/A-pen-app/logging"
 	"github.com/jmoiron/sqlx"
 )
@@ -117,7 +117,6 @@ func (s *agentStore) SearchThreads(ctx context.Context, userID, keyword, cursor 
 			"error", err.Error())
 		return nil, err
 	}
-	
 	return rows, nil
 }
 
@@ -138,7 +137,7 @@ func (s *agentStore) CreateThread(ctx context.Context, thread *models.MastraThre
 			"error", err.Error())
 		return err
 	}
-	
+
 	return nil
 }
 
@@ -160,10 +159,10 @@ func (s *agentStore) GetThread(ctx context.Context, threadID, userID string) (*m
 			"user_id", userID,
 			"error", err.Error(),
 			"db_error", err)
-		
+
 		return nil, e.Wrap(e.ErrorNotFound, "thread not found or not owned by user")
 	}
-	
+
 	return &thread, nil
 }
 
@@ -213,7 +212,7 @@ func (s *agentStore) UpdateThread(ctx context.Context, threadID, userID, title s
 			"error", err.Error())
 		return err
 	}
-	
+
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		logging.Errorw(ctx, "Failed to get affected rows after update",
@@ -222,17 +221,17 @@ func (s *agentStore) UpdateThread(ctx context.Context, threadID, userID, title s
 			"error", err.Error())
 		return err
 	}
-	
+
 	if rowsAffected == 0 {
 		logging.Errorw(ctx, "Thread not found for update or access denied",
 			"thread_id", threadID,
 			"user_id", userID,
 			"title", title,
 			"rows_affected", rowsAffected)
-		
+
 		return e.Wrap(e.ErrorNotFound, "thread not found or not owned by user")
 	}
-	
+
 	return nil
 }
 
@@ -270,20 +269,24 @@ func (s *agentStore) UpdateThreadPin(ctx context.Context, userID, threadID strin
 }
 
 func (s *agentStore) ListMessages(ctx context.Context, threadID, userID string, after *cursor.Position, count int) ([]models.MessageWithFeedback, error) {
-	query := `
+	// Only the owner's own, undeleted thread is listed.
+	ended := endedRuns("$2")
+	query := ended.with + `
 		SELECT
 			m.id,
 			m.content,
 			m.role,
 			m.type,
 			f.feedback_type,
-			` + messageCreatedAt + ` AS "createdAt"
+			` + messageCreatedAt + ` AS "createdAt",
+			` + ended.status + ` AS ended_status
 		FROM {schema}.mastra_messages m
+		JOIN {schema}.mastra_threads t ON t.id = m.thread_id AND t."resourceId" = $1 AND t."deletedAt" IS NULL
 		LEFT JOIN {schema}.response_feedback f ON f.message_id = m.id AND f.user_id = $1 AND f.thread_id = $2
-		LEFT JOIN {schema}.mastra_threads t ON t.id = m.thread_id
+		` + ended.join + `
 		WHERE m.thread_id = $2
 		AND m.role IN ('user', 'assistant')
-	` + endedRunMessageFilter
+		` + ended.visible
 	args := []interface{}{userID, threadID}
 	argIdx := 3
 
@@ -311,7 +314,6 @@ func (s *agentStore) ListMessages(ctx context.Context, threadID, userID string, 
 			"error", err.Error())
 		return nil, err
 	}
-	
 	return rows, nil
 }
 

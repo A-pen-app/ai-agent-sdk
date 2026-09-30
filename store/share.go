@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	e "github.com/A-pen-app/errors"
 	"github.com/A-pen-app/ai-agent-sdk/cursor"
 	"github.com/A-pen-app/ai-agent-sdk/models"
+	e "github.com/A-pen-app/errors"
 	"github.com/A-pen-app/logging"
 	"github.com/jmoiron/sqlx"
 )
@@ -53,19 +53,21 @@ func (s *shareStore) GetShareLink(ctx context.Context, id string) (*models.Share
 func (s *shareStore) ListSharedMessages(ctx context.Context, threadID string, endDate time.Time, after *cursor.Position, count int) ([]models.MessageWithFeedback, error) {
 	// The share link's created_at ($2) is a timestamptz instant: the snapshot
 	// bound compares it with the same messageCreatedAt the page is ordered on.
-	query := `
+	ended := endedRuns("$1")
+	query := ended.with + `
 		SELECT
 			m.id,
 			m.content,
 			m.role,
 			m.type,
-			` + messageCreatedAt + ` AS "createdAt"
+			` + messageCreatedAt + ` AS "createdAt",
+			` + ended.status + ` AS ended_status
 		FROM {schema}.mastra_messages m
-		LEFT JOIN {schema}.mastra_threads t ON t.id = m.thread_id
+		` + ended.join + `
 		WHERE m.thread_id = $1
 		AND m.role IN ('user', 'assistant')
 		AND ` + messageCreatedAt + ` <= $2
-	` + endedRunMessageFilter
+		` + ended.visible
 	args := []interface{}{threadID, endDate}
 	argIdx := 3
 

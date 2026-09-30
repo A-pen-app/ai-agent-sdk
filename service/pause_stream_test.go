@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -178,4 +179,44 @@ func TestCancelLocalStreamLeavesANewerStream(t *testing.T) {
 		t.Fatal("the newer stream was touched")
 	}
 	_ = oldCtx
+}
+
+// 被暫停的串流要等 pen-gpt 回覆 stop 才查 finish 的訊息清單：stop 成功後回答才會被隱藏，
+// 太早查會先看到回答、重新整理後又消失。
+func TestPausedStreamListsAfterTheStopIsAnswered(t *testing.T) {
+	var stopAnswered atomic.Bool
+	listedBeforeStop := make(chan bool, 1)
+	st := runStore{fakeStore: fakeStore{onList: func(context.Context) { listedBeforeStop <- !stopAnswered.Load() }}}
+	requested := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/custom/api/windoc/stop" {
+			time.Sleep(300 * time.Millisecond) // stop CAS 還在寫
+			stopAnswered.Store(true)
+			w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		w.Header().Set(streamRunIDHeader, testRunID)
+		writeChunk(w, `{"type":"text-delta","payload":{"text":"partial"}}`)
+		close(requested)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(upstream.Close)
+	svc := NewAgent(st, upstream.URL, "/custom/api/windoc/stream").(*agentService)
+	svc.idToken = func() (string, error) { return "", errors.New("no credentials in tests") }
+
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.StreamChat(context.Background(), "u1", &models.StreamRequest{ThreadID: "t1", Query: "q"},
+			func(*models.StreamEnvelope) error { return nil })
+	}()
+	<-requested
+	if err := svc.PauseStream(context.Background(), "t1", "u1"); err != nil {
+		t.Fatalf("PauseStream: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("StreamChat: %v", err)
+	}
+	if <-listedBeforeStop {
+		t.Fatal("finish listed the messages before pen-gpt answered the stop")
+	}
 }

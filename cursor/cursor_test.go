@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	e "github.com/A-pen-app/errors"
 )
 
 func raw(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
@@ -64,13 +66,12 @@ func TestInvalidTokens(t *testing.T) {
 		"no version":                      raw("1.m"),
 		"empty timestamp":                 raw("v1..m"),
 		"empty id":                        raw("v1.1."),
-		"extra field":                     raw("v1.1.m.x"),
 		"too few fields":                  raw("v1.1"),
 		"non-numeric timestamp":           raw("v1.abc.m"),
 		"plus sign":                       raw("v1.+1.m"),
 		"leading zero":                    raw("v1.01.m"),
 		"overflow":                        raw("v1.99999999999999999999.m"),
-		"float":                           raw("v1.1.5.m"),
+		"float":                           raw("v1.1,5.m"),
 	} {
 		if got, err := Decode(token); !errors.Is(err, ErrInvalid) || got != nil {
 			t.Errorf("%s: Decode(%q) = %v, %v; want ErrInvalid", name, token, got, err)
@@ -78,10 +79,29 @@ func TestInvalidTokens(t *testing.T) {
 	}
 }
 
-func TestEncodeRejectsIDsItCannotDecode(t *testing.T) {
-	for _, id := range []string{"", "a.b"} {
-		if _, err := Encode(Position{CreatedAt: time.Now(), ID: id}); err == nil {
-			t.Errorf("Encode(id=%q) succeeded", id)
-		}
+func TestInvalidIsWrongParams(t *testing.T) {
+	if !errors.Is(ErrInvalid, e.ErrorWrongParams) {
+		t.Fatal("ErrInvalid does not wrap e.ErrorWrongParams: e.Handle would not answer 400")
+	}
+}
+
+func TestIDMayContainDots(t *testing.T) {
+	p := Position{CreatedAt: time.Date(2026, 9, 30, 2, 0, 0, 0, time.UTC), ID: "msg.1.a"}
+	token, err := Encode(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decode(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != p.ID || !got.CreatedAt.Equal(p.CreatedAt) {
+		t.Fatalf("Decode = %+v, want %+v", got, p)
+	}
+}
+
+func TestEncodeRejectsEmptyID(t *testing.T) {
+	if _, err := Encode(Position{CreatedAt: time.Now()}); err == nil {
+		t.Error("Encode(id=\"\") succeeded")
 	}
 }
