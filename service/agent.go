@@ -32,6 +32,8 @@ type agentService struct {
 	// newer stream on the same thread may have superseded it).
 	activeStreams map[string]*streamHandle
 	streamMutex   sync.RWMutex
+	// pauseWait is pauseWaitTimeout; tests shorten it.
+	pauseWait time.Duration
 }
 
 // streamHandle identifies one active stream and carries its cancel function.
@@ -60,16 +62,26 @@ func (h *streamHandle) endPause() {
 }
 
 // waitForStop returns once a pause of this stream has its answer from
-// pen-gpt, at most pauseTimeout later; at once when it was not paused.
+// pen-gpt, at most pauseAnswerTimeout later; at once when it was not paused.
 func (h *streamHandle) waitForStop() {
 	if !h.pausing.Load() {
 		return
 	}
-	timer := time.NewTimer(pauseTimeout)
+	timer := time.NewTimer(pauseAnswerTimeout)
 	defer timer.Stop()
 	select {
 	case <-h.stopAnswered:
 	case <-timer.C:
+	}
+}
+
+// settled reports whether the upstream has answered or failed.
+func (h *streamHandle) settled() bool {
+	select {
+	case <-h.ready:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -100,6 +112,7 @@ func NewAgent(s store.Agent, agentStreamURL string, streamPath ...string) Agent 
 		httpClient:     httpClient,
 		idToken:        (&cloudRunIDTokenSource{audience: agentStreamURL}).token,
 		activeStreams:  make(map[string]*streamHandle),
+		pauseWait:      pauseWaitTimeout,
 	}
 }
 
@@ -753,103 +766,121 @@ func extractHasResults(result interface{}) *bool {
 	return nil
 }
 
-// PauseStream cancels an in-flight stream for the given thread. It runs
-// two independent steps so a failure in one does not block the other:
+// PauseStream stops the thread's running turn in two steps, in this order:
 //
-//  1. Local cancel — releases the BFF's scanner loop and frees resources
-//     held by doUpstreamStream. Without this, the BFF would keep reading
-//     until the upstream connection naturally closes.
+//  1. Remote stop — calls pen-gpt's /stop endpoint for one run, which
+//     records the turn as stopped and aborts the running agent.stream() on
+//     whichever pen-gpt instance runs it. This is the only step that stops
+//     the LLM and keeps the partial answer out of memory, because Cloud Run
+//     + HTTP/1.1 will not propagate the local TCP close to the container.
 //
-//  2. Remote stop — calls pen-gpt's /stop endpoint for one run, which
-//     aborts the running agent.stream() on whichever pen-gpt instance runs
-//     it. This is the only step that stops the LLM and prevents partial
-//     messages from being persisted to memory, because Cloud Run +
-//     HTTP/1.1 will not propagate the local TCP close to the container.
+//  2. Local cancel — once pen-gpt has recorded the stop, releases this
+//     instance's scanner loop, so the finish event lists the thread as it
+//     is after the stop. When the remote stop fails, the local stream keeps
+//     running: the user still gets the answer pen-gpt goes on generating.
 //
-// The run is fixed once per call: the one this BFF instance streams, or,
-// when another instance streams it, the thread's running run in
-// stream_runs. A stop never names only the thread, so it cannot reach a
-// newer run. Returns ErrorNotFound when there is no run to stop, and an
-// internal error when pen-gpt could not record the stop.
+// The run is fixed once per call (see pauseTarget): the one of the stream
+// this instance runs on the thread when the pause arrives, or, when another
+// instance streams it, the thread's running run in stream_runs. A stop never
+// names only the thread, and a stream that replaces the bound one is never
+// stopped or cancelled, so a late stop cannot reach a newer turn. Returns
+// ErrorNotFound when there is no run to stop, and an internal error when
+// pen-gpt could not record the stop.
 func (svc *agentService) PauseStream(ctx context.Context, threadID, userID string) error {
-	// A fresh bounded context so an already-expired parent ctx (e.g. the
-	// inbound request was already torn down) does not prevent the stop.
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), pauseTimeout)
-	defer stopCancel()
-
-	runID, h, localCancelled, err := svc.pauseTarget(stopCtx, threadID, userID)
+	h, runID, err := svc.pauseTarget(threadID, userID)
 	if h != nil {
+		// The stream's finish list waits for this pause's answer (waitForStop).
+		h.pausing.Store(true)
 		defer h.endPause()
 	}
 	if err != nil {
 		logging.Errorw(ctx, "failed to find the run to pause",
 			"thread_id", threadID,
 			"user_id", userID,
-			"local_cancelled", localCancelled,
 			"error", err.Error())
 		return e.Wrap(e.ErrorInternalError, "failed to find the stream to pause")
 	}
 	if runID == "" {
-		if localCancelled {
+		// No run to stop remotely: pen-gpt has not opened one, or this
+		// stream ended without one.
+		if h != nil && svc.cancelLocalStream(threadID, h) {
 			return nil
 		}
 		logging.Infow(ctx, "no active stream to pause", "thread_id", threadID, "user_id", userID)
 		return e.Wrap(e.ErrorNotFound, "no active stream found for thread")
 	}
 
+	// A fresh bounded context so an already-expired parent ctx (e.g. the
+	// inbound request was already torn down) does not prevent the stop.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), remoteStopTimeout)
+	defer stopCancel()
 	remoteOk, remoteErr := svc.callRemoteStop(stopCtx, threadID, runID, userID)
 	if remoteErr != nil {
 		logging.Errorw(ctx, "remote stop failed",
 			"thread_id", threadID,
 			"user_id", userID,
 			"run_id", runID,
-			"local_cancelled", localCancelled,
 			"error", remoteErr.Error())
 		return e.Wrap(e.ErrorInternalError, "failed to stop the upstream stream")
 	}
-	// ok:false: the run already finished its generation or ended.
-	if !remoteOk && !localCancelled {
+	// ok:false: the run already finished its generation or ended, and any
+	// local stream of it is about to end on its own.
+	if !remoteOk {
 		logging.Infow(ctx, "no active stream to pause", "thread_id", threadID, "user_id", userID, "run_id", runID)
 		return e.Wrap(e.ErrorNotFound, "no active stream found for thread")
+	}
+	if h != nil {
+		svc.cancelLocalStream(threadID, h)
 	}
 	return nil
 }
 
-// pauseTimeout bounds a whole PauseStream: waiting for the run id, the
+// pauseWaitTimeout bounds how long a pause waits for this instance's
+// stream to learn its run id from pen-gpt's response headers.
+const pauseWaitTimeout = 5 * time.Second
+
+// pauseAnswerTimeout bounds a whole pause: the wait for the run id, the
 // stream_runs lookup and the remote stop.
-const pauseTimeout = 5 * time.Second
+const pauseAnswerTimeout = pauseWaitTimeout + 2*remoteStopTimeout
 
-// pauseTarget cancels this instance's stream on the thread, if any, and
-// returns the run to stop remotely ("" when there is none) and the stream's
-// handle, marked as pausing: the caller ends the pause once the stop is
-// answered.
-func (svc *agentService) pauseTarget(ctx context.Context, threadID, userID string) (string, *streamHandle, bool, error) {
-	svc.streamMutex.RLock()
-	h := svc.activeStreams[threadID]
-	svc.streamMutex.RUnlock()
-
-	if h != nil {
-		// The run id arrives with pen-gpt's response headers, before any
-		// text; a pause that lands earlier waits for it so the stop still
-		// names its run.
-		settled := false
-		select {
-		case <-h.ready:
-			settled = true
-		case <-ctx.Done():
-		}
-		h.pausing.Store(true)
-		cancelled := svc.cancelLocalStream(threadID, h)
-		if settled {
-			return h.runID, h, cancelled, nil
-		}
-		// No answer in time: pen-gpt may have opened the run meanwhile.
-		runID, err := svc.s.FindRunningRunID(ctx, userID, threadID)
-		return runID, h, cancelled, err
+// pauseTarget returns the stream this pause is bound to and its run.
+//
+// The pause binds the thread's stream as it is when the pause arrives, and
+// only its run: a stream that replaces it afterwards is a later turn, which
+// a late stop must never reach. So with a local stream it waits for that
+// stream's run id and never falls back to stream_runs, where the running run
+// may already be the newer turn's; replaced or still without a run id, it
+// returns "" (not found, or a local cancel before pen-gpt opened a run).
+// Only without a local stream, when another instance streams the run, does
+// it read the thread's running run from stream_runs. It cancels nothing.
+func (svc *agentService) pauseTarget(threadID, userID string) (*streamHandle, string, error) {
+	h := svc.localStream(threadID)
+	if h == nil {
+		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), remoteStopTimeout)
+		defer lookupCancel()
+		runID, err := svc.s.FindRunningRunID(lookupCtx, userID, threadID)
+		return nil, runID, err
 	}
 
-	runID, err := svc.s.FindRunningRunID(ctx, userID, threadID)
-	return runID, nil, false, err
+	// The run id arrives with pen-gpt's response headers, before any text; a
+	// pause that lands earlier waits for it so the stop still names its run.
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), svc.pauseWait)
+	defer waitCancel()
+	select {
+	case <-h.ready:
+	case <-waitCtx.Done():
+	}
+	if h.settled() {
+		// "" when h ended, or was replaced, before pen-gpt opened its run.
+		return h, h.runID, nil
+	}
+	return h, "", nil
+}
+
+func (svc *agentService) localStream(threadID string) *streamHandle {
+	svc.streamMutex.RLock()
+	defer svc.streamMutex.RUnlock()
+	return svc.activeStreams[threadID]
 }
 
 // cancelLocalStream cancels the stream h and removes it from the active
