@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"testing"
@@ -237,6 +238,59 @@ func TestPreV1CursorIsInvalid(t *testing.T) {
 			if !errors.Is(ErrInvalidCursor, cursor.ErrInvalid) {
 				t.Error("ErrInvalidCursor is not cursor.ErrInvalid")
 			}
+		})
+	}
+}
+
+// The stopped turn's user message carries ended_status in both responses'
+// JSON; no other message carries one.
+func TestEndedStatusReachesTheResponses(t *testing.T) {
+	db := testdb.Open(t, "UTC")
+	for _, schema := range testdb.ProductSchemas {
+		t.Run(schema, func(t *testing.T) {
+			seedConversation(testdb.Reset(t, db, schema))
+			agent, share := services(db, schema)
+			const marked = "m03"
+
+			check := func(name string, resp any) {
+				t.Helper()
+				raw, err := json.Marshal(resp)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var body struct {
+					Data []map[string]any `json:"data"`
+				}
+				if err := json.Unmarshal(raw, &body); err != nil {
+					t.Fatal(err)
+				}
+				seen := false
+				for _, m := range body.Data {
+					status, has := m["ended_status"]
+					if m["id"] == marked {
+						seen = true
+						if status != "stopped" {
+							t.Errorf("%s %s ended_status = %v, want stopped", name, marked, status)
+						}
+					} else if has {
+						t.Errorf("%s %s has ended_status %v", name, m["id"], status)
+					}
+				}
+				if !seen {
+					t.Errorf("%s did not return %s", name, marked)
+				}
+			}
+
+			resp, err := agent.ListMessages(context.Background(), threadID, owner, "", 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check("ListMessages", resp)
+			shared, err := share.ListSharedMessages(context.Background(), linkID, "", 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check("ListSharedMessages", shared)
 		})
 	}
 }
