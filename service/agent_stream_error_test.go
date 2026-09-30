@@ -31,12 +31,16 @@ const leaked = "relation windoc_core.secret_table does not exist"
 // fakeStore 只實作 finish event 用到的 ListMessages；onList 在送 finish 前被呼叫。
 type fakeStore struct {
 	store.Agent
-	onList func(ctx context.Context)
+	onList  func(ctx context.Context)
+	listErr error
 }
 
 func (f fakeStore) ListMessages(ctx context.Context, _, _, _ string, _ int) ([]models.MessageWithFeedback, error) {
 	if f.onList != nil {
 		f.onList(ctx)
+	}
+	if f.listErr != nil {
+		return nil, f.listErr
 	}
 	return nil, ctx.Err()
 }
@@ -196,8 +200,10 @@ func TestUpstreamReadFailureIsReported(t *testing.T) {
 	if got := eventTypes(events); got != want {
 		t.Fatalf("want events %s, got %s", want, got)
 	}
-	if stops.Load() != 1 {
-		t.Fatalf("want 1 upstream stop, got %d", stops.Load())
+	// A transport failure is not the user stopping: /stop would record the
+	// turn as stopped. pen-gpt finishes, fails or reconciles it itself.
+	if stops.Load() != 0 {
+		t.Fatalf("want no upstream stop, got %d", stops.Load())
 	}
 }
 
@@ -226,8 +232,10 @@ func TestCancelWithCauseIsReported(t *testing.T) {
 	if got := eventTypes(events); got != "start,text_delta,error,finish,done" {
 		t.Fatalf("unexpected events %s", got)
 	}
-	if stops.Load() != 1 {
-		t.Fatalf("want 1 upstream stop, got %d", stops.Load())
+	// A transport failure is not the user stopping: /stop would record the
+	// turn as stopped. pen-gpt finishes, fails or reconciles it itself.
+	if stops.Load() != 0 {
+		t.Fatalf("want no upstream stop, got %d", stops.Load())
 	}
 }
 
@@ -283,5 +291,69 @@ func TestLogSnippetKeepsValidUTF8(t *testing.T) {
 	s := logSnippet([]byte(strings.Repeat("錯", upstreamLogLimit)))
 	if !utf8.ValidString(s) || len(s) > upstreamLogLimit || len(s) < upstreamLogLimit-3 {
 		t.Fatalf("bad snippet: len=%d valid=%v", len(s), utf8.ValidString(s))
+	}
+}
+
+// 204：stop 在串流建立前就到了 pen-gpt，是停止不是失敗，不送 error event。
+func TestUpstreamNoContentIsAStop(t *testing.T) {
+	events, err := runUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	if err != nil {
+		t.Fatalf("want nil, got %v", err)
+	}
+	if got := eventTypes(events); got != "start,finish,done" {
+		t.Fatalf("unexpected events %s", got)
+	}
+}
+
+// pen-gpt 在開 run 之前拒絕的 request 各有自己的 code，前端才分得出來；
+// 不是 pen-gpt 的拒絕（例如 Cloud Run 因為 ID token 回 403）仍是 UPSTREAM_ERROR。
+func TestUpstreamRefusalsHaveTheirOwnCodes(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		status        int
+		body          string
+		code, message string
+	}{
+		{"pen-gpt finalizing", http.StatusConflict,
+			`{"error":"previous response is still finalizing","code":"RUN_FINALIZING","retryable":true}`,
+			StreamErrorRunFinalizing, "上一則回答還在處理中，請稍後再試"},
+		{"pen-gpt thread forbidden", http.StatusForbidden,
+			`{"error":"thread belongs to another user"}`,
+			StreamErrorThreadForbidden, "無法存取這個對話"},
+		{"Cloud Run forbidden", http.StatusForbidden,
+			"<html><title>403 Forbidden</title>" + leaked + "</html>",
+			"UPSTREAM_ERROR", "AI 服務發生錯誤"},
+		{"other conflict", http.StatusConflict,
+			`{"error":"` + leaked + `"}`,
+			"UPSTREAM_ERROR", "AI 服務發生錯誤"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			events, err := runUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(c.status)
+				fmt.Fprint(w, c.body)
+			})
+			assertSingleError(t, events, err, c.code, c.message)
+		})
+	}
+}
+
+// finish 查不到訊息時不能送空的 finish（前端會當成對話是空的），改送 error event。
+func TestFinishListFailureIsAnError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(streamRunIDHeader, testRunID)
+		writeChunk(w, `{"type":"text-delta","payload":{"text":"answer"}}`)
+	}))
+	defer upstream.Close()
+	events, err := streamChat(context.Background(), newTestAgent(upstream.URL, fakeStore{listErr: errors.New("db down")}))
+	if !errors.Is(err, ErrClientNotified) {
+		t.Fatalf("want ErrClientNotified, got %v", err)
+	}
+	if got := eventTypes(events); got != "start,text_delta,error,done" {
+		t.Fatalf("unexpected events %s", got)
+	}
+	if data := events[2].Data.(models.StreamErrorData); data.Code != "INTERNAL_ERROR" {
+		t.Fatalf("unexpected error event %#v", data)
 	}
 }

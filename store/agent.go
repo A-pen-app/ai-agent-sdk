@@ -63,7 +63,7 @@ func (s *agentStore) ListThreads(ctx context.Context, userID, cursor string, cou
 	args = append(args, count+1)
 
 	var rows []models.ThreadWithPin
-	if err := s.db.Select(&rows, s.schema.sql(query), args...); err != nil {
+	if err := s.db.SelectContext(ctx, &rows, s.schema.sql(query), args...); err != nil {
 		logging.Errorw(ctx, "Failed to list threads",
 			"user_id", userID,
 			"error", err.Error())
@@ -109,7 +109,7 @@ func (s *agentStore) SearchThreads(ctx context.Context, userID, keyword, cursor 
 	args = append(args, count+1)
 
 	var rows []models.ThreadWithPin
-	if err := s.db.Select(&rows, s.schema.sql(query), args...); err != nil {
+	if err := s.db.SelectContext(ctx, &rows, s.schema.sql(query), args...); err != nil {
 		logging.Errorw(ctx, "Failed to search threads",
 			"user_id", userID,
 			"keyword", keyword,
@@ -128,7 +128,7 @@ func (s *agentStore) CreateThread(ctx context.Context, thread *models.MastraThre
 			title = EXCLUDED.title,
 			"updatedAt" = EXCLUDED."updatedAt"
 	`
-	_, err := s.db.NamedExec(s.schema.sql(query), thread)
+	_, err := s.db.NamedExecContext(ctx, s.schema.sql(query), thread)
 	if err != nil {
 		logging.Errorw(ctx, "Failed to create thread",
 			"thread_id", thread.ID,
@@ -152,7 +152,7 @@ func (s *agentStore) GetThread(ctx context.Context, threadID, userID string) (*m
 		WHERE t.id = $2 AND t."resourceId" = $1 AND t."deletedAt" IS NULL
 	`
 	var thread models.ThreadWithPin
-	err := s.db.Get(&thread, s.schema.sql(query), userID, threadID)
+	err := s.db.GetContext(ctx, &thread, s.schema.sql(query), userID, threadID)
 	if err != nil {
 		logging.Errorw(ctx, "Thread not found or access denied",
 			"thread_id", threadID,
@@ -168,7 +168,7 @@ func (s *agentStore) GetThread(ctx context.Context, threadID, userID string) (*m
 
 func (s *agentStore) DeleteThread(ctx context.Context, threadID, userID string) error {
 	// Soft delete: set deletedAt timestamp instead of removing the row.
-	result, err := s.db.Exec(
+	result, err := s.db.ExecContext(ctx, 
 		s.schema.sql(`UPDATE {schema}.mastra_threads SET "deletedAt" = NOW() WHERE id = $1 AND "resourceId" = $2 AND "deletedAt" IS NULL`),
 		threadID, userID,
 	)
@@ -203,7 +203,7 @@ func (s *agentStore) DeleteThread(ctx context.Context, threadID, userID string) 
 
 func (s *agentStore) UpdateThread(ctx context.Context, threadID, userID, title string) error {
 	query := `UPDATE {schema}.mastra_threads SET title = $1, "updatedAt" = NOW() WHERE id = $2 AND "resourceId" = $3 AND "deletedAt" IS NULL`
-	result, err := s.db.Exec(s.schema.sql(query), title, threadID, userID)
+	result, err := s.db.ExecContext(ctx, s.schema.sql(query), title, threadID, userID)
 	if err != nil {
 		logging.Errorw(ctx, "Failed to update thread - database error",
 			"thread_id", threadID,
@@ -243,7 +243,7 @@ func (s *agentStore) UpdateThreadPin(ctx context.Context, userID, threadID strin
 			ON CONFLICT (user_id, thread_id)
 			DO UPDATE SET is_deleted = false, pinned_at = NOW()
 		`
-		_, err := s.db.Exec(s.schema.sql(query), userID, threadID)
+		_, err := s.db.ExecContext(ctx, s.schema.sql(query), userID, threadID)
 		if err != nil {
 			logging.Errorw(ctx, "Failed to pin thread",
 				"user_id", userID,
@@ -257,7 +257,7 @@ func (s *agentStore) UpdateThreadPin(ctx context.Context, userID, threadID strin
 		UPDATE {schema}.thread_pin SET is_deleted = true
 		WHERE user_id = $1 AND thread_id = $2
 	`
-	_, err := s.db.Exec(s.schema.sql(query), userID, threadID)
+	_, err := s.db.ExecContext(ctx, s.schema.sql(query), userID, threadID)
 	if err != nil {
 		logging.Errorw(ctx, "Failed to unpin thread",
 			"user_id", userID,
@@ -307,7 +307,7 @@ func (s *agentStore) ListMessages(ctx context.Context, threadID, userID, cursor 
 	args = append(args, count+1)
 
 	var rows []models.MessageWithFeedback
-	if err := s.db.Select(&rows, s.schema.sql(query), args...); err != nil {
+	if err := s.db.SelectContext(ctx, &rows, s.schema.sql(query), args...); err != nil {
 		logging.Errorw(ctx, "Failed to list messages",
 			"thread_id", threadID,
 			"user_id", userID,
@@ -328,7 +328,7 @@ func (s *agentStore) UpsertFeedback(ctx context.Context, userID, messageID, feed
 		ON CONFLICT (message_id, thread_id, user_id)
 		DO UPDATE SET feedback_type = $3, updated_at = NOW()
 	`
-	result, err := s.db.Exec(s.schema.sql(query), userID, messageID, feedback)
+	result, err := s.db.ExecContext(ctx, s.schema.sql(query), userID, messageID, feedback)
 	if err != nil {
 		logging.Errorw(ctx, "Failed to upsert feedback - database error",
 			"user_id", userID,
@@ -369,7 +369,7 @@ func (s *agentStore) FindRunningRunID(ctx context.Context, userID, threadID stri
 		WHERE user_id = $1 AND thread_id = $2 AND status = 'running'
 	`
 	var runIDs []string
-	if err := s.db.Select(&runIDs, s.schema.sql(query), userID, threadID); err != nil {
+	if err := s.db.SelectContext(ctx, &runIDs, s.schema.sql(query), userID, threadID); err != nil {
 		logging.Errorw(ctx, "Failed to find running stream run",
 			"thread_id", threadID,
 			"user_id", userID,
@@ -380,4 +380,16 @@ func (s *agentStore) FindRunningRunID(ctx context.Context, userID, threadID stri
 		return "", nil
 	}
 	return runIDs[0], nil
+}
+
+// CheckStreamRuns fails unless the connection's role can read
+// {schemaName}.stream_runs, which pausing a stream on another BFF instance
+// needs. Call it at startup so a missing pen-gpt migration or grant fails the
+// deploy instead of every cross-instance pause.
+func CheckStreamRuns(ctx context.Context, db *sqlx.DB, schemaName string) error {
+	query := newSchema(schemaName).sql(`SELECT run_id FROM {schema}.stream_runs LIMIT 0`)
+	if _, err := db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("ai-agent-sdk needs SELECT on %s.stream_runs (pen-gpt's stream_runs migration and grant): %w", schemaName, err)
+	}
+	return nil
 }

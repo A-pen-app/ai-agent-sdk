@@ -27,7 +27,7 @@ func (s *shareStore) CreateShareLink(ctx context.Context, shareLink *models.Shar
 		INSERT INTO {schema}.share_links (id, type, reference_id, user_id, created_at, updated_at)
 		VALUES (:id, :type, :reference_id, :user_id, :created_at, :updated_at)
 	`
-	if _, err := s.db.NamedExec(s.schema.sql(query), shareLink); err != nil {
+	if _, err := s.db.NamedExecContext(ctx, s.schema.sql(query), shareLink); err != nil {
 		logging.Errorw(ctx, "Failed to create share link",
 			"id", shareLink.ID,
 			"reference_id", shareLink.ReferenceID,
@@ -40,7 +40,7 @@ func (s *shareStore) CreateShareLink(ctx context.Context, shareLink *models.Shar
 func (s *shareStore) GetShareLink(ctx context.Context, id string) (*models.ShareLink, error) {
 	query := `SELECT id, type, reference_id, user_id, short_code, created_at, deleted_at, updated_at FROM {schema}.share_links WHERE id = $1`
 	var link models.ShareLink
-	if err := s.db.Get(&link, s.schema.sql(query), id); err != nil {
+	if err := s.db.GetContext(ctx, &link, s.schema.sql(query), id); err != nil {
 		logging.Errorw(ctx, "Share link not found",
 			"id", id,
 			"error", err.Error())
@@ -90,7 +90,7 @@ func (s *shareStore) ListSharedMessages(ctx context.Context, threadID string, en
 	args = append(args, count+1)
 
 	var rows []models.MessageWithFeedback
-	if err := s.db.Select(&rows, s.schema.sql(query), args...); err != nil {
+	if err := s.db.SelectContext(ctx, &rows, s.schema.sql(query), args...); err != nil {
 		logging.Errorw(ctx, "Failed to list shared messages",
 			"thread_id", threadID,
 			"error", err.Error())
@@ -101,7 +101,7 @@ func (s *shareStore) ListSharedMessages(ctx context.Context, threadID string, en
 
 func (s *shareStore) UpdateShareLinkShortCode(ctx context.Context, id, shortCode string) error {
 	query := `UPDATE {schema}.share_links SET short_code = $1, updated_at = NOW() WHERE id = $2`
-	if _, err := s.db.Exec(s.schema.sql(query), shortCode, id); err != nil {
+	if _, err := s.db.ExecContext(ctx, s.schema.sql(query), shortCode, id); err != nil {
 		logging.Errorw(ctx, "Failed to update share link short code",
 			"id", id,
 			"error", err.Error())

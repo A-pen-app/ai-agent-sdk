@@ -115,8 +115,12 @@ func (svc *agentService) StreamChat(ctx context.Context, userID string, req *mod
 	defer listCancel()
 	messages, err := svc.ListMessages(listCtx, req.ThreadID, userID, "", 100)
 	if err != nil {
+		// An empty finish would read as an empty thread: report it instead.
 		logging.Error(ctx, "failed to list messages for finish event: %v", err)
-		_ = writer(&models.StreamEnvelope{Event: models.StreamEventFinish, Data: []models.MessageResponse{}})
+		if streamErr == nil {
+			sendStreamError(writer, "INTERNAL_ERROR", "訊息載入失敗，請重新整理")
+			streamErr = fmt.Errorf("list messages for finish event: %w", err)
+		}
 	} else {
 		_ = writer(&models.StreamEnvelope{Event: models.StreamEventFinish, Data: messages.Data})
 	}
@@ -209,14 +213,19 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 	}
 	defer resp.Body.Close()
 
+	// 204: a stop reached the run before its stream existed. Not a failure.
+	if resp.StatusCode == http.StatusNoContent {
+		logging.Infow(ctx, "upstream stream stopped before start", "thread_id", req.ThreadID)
+		return nil, nil, nil
+	}
 	if resp.StatusCode != http.StatusOK {
-		h.settle("")
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamLogLimit))
 		logging.Errorw(ctx, "upstream stream returned non-OK status",
 			"status_code", resp.StatusCode,
 			"body", logSnippet(detail),
 			"thread_id", req.ThreadID)
-		sendStreamError(writer, "UPSTREAM_ERROR", "AI 服務發生錯誤")
+		code, message := upstreamStatusError(resp.StatusCode, detail)
+		sendStreamError(writer, code, message)
 		return nil, nil, fmt.Errorf("upstream stream returned status %d", resp.StatusCode)
 	}
 
@@ -356,8 +365,8 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 	if err := scanner.Err(); err != nil && upstreamErr == nil && !stopped(ctx) {
 		logging.Errorw(ctx, "upstream stream read failed", "error", err.Error(), "thread_id", req.ThreadID)
 		sendStreamError(writer, "UPSTREAM_ERROR", "AI 服務發生錯誤")
-		// 讀取中斷（逾時、連線斷掉）時 pen-gpt 可能還在跑，本地關連線傳不到它，要明確叫停。
-		svc.stopAfterFailure(ctx, req.ThreadID, h.runID, userID)
+		// 不打 /stop：/stop 會把這一輪記成使用者停止。pen-gpt 自己會跑完、失敗或
+		// 由 reconciliation 收斂，重新整理可能看到它完成的回答。
 		return refs, recs, fmt.Errorf("read upstream stream: %w", err)
 	}
 
@@ -368,19 +377,6 @@ func (svc *agentService) doUpstreamStream(ctx context.Context, userID string, re
 // 帶 cause 的取消（呼叫端用 context.WithCancelCause 標出逾時等原因）算失敗，照樣送 error event。
 func stopped(ctx context.Context) bool {
 	return ctx.Err() != nil && errors.Is(context.Cause(ctx), context.Canceled)
-}
-
-// stopAfterFailure 在上游讀取失敗後叫 pen-gpt 停止這一輪（runID）；沒有 runID 就沒有能停的 run。失敗只記 log。
-func (svc *agentService) stopAfterFailure(ctx context.Context, threadID, runID, userID string) {
-	if runID == "" {
-		logging.Errorw(ctx, "upstream stream has no run id to stop", "thread_id", threadID)
-		return
-	}
-	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), remoteStopTimeout)
-	defer cancel()
-	if _, err := svc.callRemoteStop(stopCtx, threadID, runID, userID); err != nil {
-		logging.Errorw(ctx, "failed to stop upstream after stream failure", "error", err.Error(), "thread_id", threadID, "run_id", runID)
-	}
 }
 
 // callRemoteStop calls Mastra's /custom/api/chat/stop endpoint to abort an
@@ -464,7 +460,12 @@ func filterThought(text string, inThought bool) (string, bool) {
 // 本機 authorized_user 憑證拿不到 ID token，照樣送出；在 Cloud Run 上看到這行 log，
 // 後面的 401/403 就是它造成的。
 func (svc *agentService) setIDToken(ctx context.Context, req *http.Request) {
-	token, err := svc.idToken()
+	setIDToken(ctx, req, svc.idToken)
+}
+
+// setIDToken attaches the ID token idToken returns; see agentService.setIDToken.
+func setIDToken(ctx context.Context, req *http.Request, idToken func() (string, error)) {
+	token, err := idToken()
 	if err != nil {
 		logging.Warn(ctx, "sending upstream request without Cloud Run ID token: %v", err)
 		return
@@ -510,6 +511,39 @@ func logSnippet(b []byte) string {
 }
 
 // sendStreamError sends an error event to the client.
+// Error event codes for a request pen-gpt refused before opening a run.
+const (
+	// StreamErrorRunFinalizing: the thread's previous answer is still being
+	// saved (pen-gpt 409 RUN_FINALIZING). Retryable after a moment.
+	StreamErrorRunFinalizing = "RUN_FINALIZING"
+	// StreamErrorThreadForbidden: the thread belongs to another user (403).
+	StreamErrorThreadForbidden = "THREAD_FORBIDDEN"
+)
+
+// upstreamStatusError is the error event for a non-200, non-204 stream
+// response. Only pen-gpt's own refusals get their codes: a 403 from Cloud Run
+// (a missing or rejected ID token) or a 409 from anything else is still an
+// UPSTREAM_ERROR, so the body must say which refusal it is.
+func upstreamStatusError(status int, body []byte) (code, message string) {
+	var refusal struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	_ = json.Unmarshal(body, &refusal)
+	switch {
+	case status == http.StatusConflict && refusal.Code == StreamErrorRunFinalizing:
+		return StreamErrorRunFinalizing, "上一則回答還在處理中，請稍後再試"
+	case status == http.StatusForbidden && refusal.Error == penGPTThreadForbidden:
+		return StreamErrorThreadForbidden, "無法存取這個對話"
+	default:
+		return "UPSTREAM_ERROR", "AI 服務發生錯誤"
+	}
+}
+
+// penGPTThreadForbidden is the error pen-gpt answers a request for another
+// user's thread with (src/api/stream-run-http.ts, unopenedRunResponse).
+const penGPTThreadForbidden = "thread belongs to another user"
+
 func sendStreamError(writer StreamWriter, code, message string) {
 	_ = writer(&models.StreamEnvelope{
 		Event: models.StreamEventError,
