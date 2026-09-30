@@ -20,10 +20,11 @@ import (
 
 // ErrInvalid is returned for a token this version cannot read: malformed,
 // an unknown version, or a pre-v1 cursor (a bare message id). It is an
-// e.Wrap of e.ErrorWrongParams: e.Handle maps only the error inside the
-// outermost e.Wrap, by equality, so returned as is it answers 400
-// WRONG_PARAMETER and the client restarts from the first page. Wrapping it
-// again in e.Wrap or fmt.Errorf turns that into a 500.
+// e.Wrap of e.ErrorWrongParams: e.Handle finds the outermost *e.AppError with
+// errors.As and maps its direct cause by equality, so it answers 400
+// WRONG_PARAMETER and the client restarts from the first page. That holds
+// when a caller adds context with fmt.Errorf("%w", ErrInvalid); wrapping it
+// in another e.Wrap makes ErrInvalid itself the cause and answers 500.
 var ErrInvalid = e.Wrap(e.ErrorWrongParams, "reason", "invalid pagination cursor")
 
 const version = "v1"

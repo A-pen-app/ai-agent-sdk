@@ -169,6 +169,13 @@ func (svc *agentService) UpdateThreadPin(ctx context.Context, userID, threadID s
 }
 
 func (svc *agentService) ListMessages(ctx context.Context, threadID, userID, token string, count int) (*models.MessageListResponse, error) {
+	// Only the owner reads a thread's messages: another user's, a deleted and
+	// an unknown thread are all ErrorNotFound (404), whatever the cursor, so
+	// they cannot be told apart. The store query repeats the condition for a
+	// thread deleted in between.
+	if _, err := svc.s.GetThread(ctx, threadID, userID); err != nil {
+		return nil, err
+	}
 	after, err := cursor.Decode(token)
 	if err != nil {
 		return nil, err

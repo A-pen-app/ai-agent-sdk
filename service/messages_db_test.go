@@ -12,6 +12,7 @@ import (
 	"github.com/A-pen-app/ai-agent-sdk/internal/testdb"
 	"github.com/A-pen-app/ai-agent-sdk/models"
 	"github.com/A-pen-app/ai-agent-sdk/store"
+	e "github.com/A-pen-app/errors"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -291,6 +292,58 @@ func TestEndedStatusReachesTheResponses(t *testing.T) {
 				t.Fatal(err)
 			}
 			check("ListSharedMessages", shared)
+		})
+	}
+}
+
+// Only the owner lists a thread's messages. Another user's, a deleted, an
+// unknown and a thread-less (orphan) thread are ErrorNotFound whatever the
+// cursor, before it is read; the owner's own thread still rejects a pre-v1
+// cursor, and an empty thread is an empty page. The share page is public.
+func TestListMessagesIsOwnerOnly(t *testing.T) {
+	db := testdb.Open(t, "UTC")
+	for _, schema := range testdb.ProductSchemas {
+		t.Run(schema, func(t *testing.T) {
+			f := testdb.Reset(t, db, schema)
+			visible := seedConversation(f)
+			f.Thread("deleted", owner)
+			f.Message("d1", "deleted", "user", "{}")
+			f.Exec(`UPDATE {schema}.mastra_threads SET "deletedAt" = NOW() WHERE id = 'deleted'`)
+			f.Message("o1", "orphan", "user", "{}")
+			f.Thread("empty", owner)
+			agent, share := services(db, schema)
+
+			validToken, err := cursor.Encode(cursor.Position{CreatedAt: f.Clock, ID: "m07"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range []struct{ name, thread, user string }{
+				{"another user's thread", threadID, "someone-else"},
+				{"deleted thread", "deleted", owner},
+				{"unknown thread", "no-such-thread", owner},
+				{"orphan messages", "orphan", owner},
+			} {
+				for _, next := range []string{"", "m07", validToken} {
+					resp, err := agent.ListMessages(context.Background(), c.thread, c.user, next, 10)
+					if !errors.Is(err, e.ErrorNotFound) || resp != nil {
+						t.Errorf("%s, next %q: ListMessages = %v, %v; want ErrorNotFound", c.name, next, resp, err)
+					}
+				}
+			}
+
+			if _, err := agent.ListMessages(context.Background(), threadID, owner, "m07", 10); !errors.Is(err, ErrInvalidCursor) {
+				t.Errorf("own thread, pre-v1 cursor: err = %v, want ErrInvalidCursor", err)
+			}
+			resp, err := agent.ListMessages(context.Background(), "empty", owner, "", 10)
+			if err != nil || resp == nil || len(resp.Data) != 0 || resp.Next != nil {
+				t.Errorf("own empty thread: ListMessages = %+v, %v; want an empty page", resp, err)
+			}
+			if got := walkMessages(t, agent, 100, nil); !slices.Equal(got, visible) {
+				t.Errorf("owner ListMessages = %v, want %v", got, visible)
+			}
+			if got := walkShared(t, share, 100, nil); !slices.Equal(got, visible) {
+				t.Errorf("share ListSharedMessages = %v, want %v", got, visible)
+			}
 		})
 	}
 }

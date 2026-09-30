@@ -49,3 +49,35 @@ func TestInvalidCursorAnswers400ThroughHandle(t *testing.T) {
 		}
 	}
 }
+
+// notOwnerStore answers GetThread as the store does for another user's,
+// a deleted or an unknown thread.
+type notOwnerStore struct{ fakeStore }
+
+func (notOwnerStore) GetThread(context.Context, string, string) (*models.ThreadWithPin, error) {
+	return nil, e.Wrap(e.ErrorNotFound, "thread not found or not owned by user")
+}
+
+// A thread the caller does not own is 404 NOT_FOUND whatever the cursor: the
+// owner check comes before the cursor is read.
+func TestNotOwnedThreadAnswers404ThroughHandle(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	agent := NewAgent(notOwnerStore{}, "http://unused")
+	router := gin.New()
+	router.GET("/threads/:id/messages", e.Handle(func(ctx *gin.Context) error {
+		_, err := agent.ListMessages(ctx.Request.Context(), ctx.Param("id"), "u1", ctx.Query("next"), 20)
+		return err
+	}))
+
+	for _, next := range []string{"", "23189f32-53c5-4b69-8704-f61abc604862"} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/threads/t1/messages?next="+next, nil))
+		var body e.HttpError
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("next %q: body %q: %v", next, w.Body.String(), err)
+		}
+		if w.Code != http.StatusNotFound || body.Code != string(e.KeyNotFound) {
+			t.Errorf("next %q: got %d %q, want 404 %q", next, w.Code, body.Code, e.KeyNotFound)
+		}
+	}
+}

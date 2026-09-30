@@ -39,6 +39,11 @@ type fakeStore struct {
 	onList func(ctx context.Context)
 }
 
+// GetThread lets ListMessages past its owner check: the thread is the caller's.
+func (fakeStore) GetThread(context.Context, string, string) (*models.ThreadWithPin, error) {
+	return &models.ThreadWithPin{}, nil
+}
+
 func (f fakeStore) ListMessages(ctx context.Context, _, _ string, _ *cursor.Position, _ int) ([]models.MessageWithFeedback, error) {
 	if f.onList != nil {
 		f.onList(ctx)
